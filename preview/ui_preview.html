@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PT-BOT Atom VX — Interactive UI Simulator (160×128)</title>
+<style>
+  :root {
+    --bg: #0b1120;
+    --panel: #1e293b;
+    --border: #334155;
+    --text: #f8fafc;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+  }
+  * { box-sizing: border-box; font-family: 'Consolas', 'Courier New', monospace; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(circle at top, #1e293b, #060a13);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 16px;
+  }
+  h1 { margin: 0 0 4px; font-size: 20px; font-family: system-ui, sans-serif; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; font-family: system-ui, sans-serif; }
+
+  .tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: center;
+    margin-bottom: 18px;
+    max-width: 960px;
+  }
+  .tab {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 6px 11px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: system-ui, sans-serif;
+  }
+  .tab:hover { border-color: var(--accent); }
+  .tab.active { background: #0284c7; border-color: #38bdf8; font-weight: 600; }
+
+  .layout {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    justify-content: center;
+    align-items: flex-start;
+    max-width: 1020px;
+    width: 100%;
+  }
+
+  .board-frame {
+    background: #111827;
+    border: 3px solid #374151;
+    border-radius: 18px;
+    padding: 18px 22px;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.65);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .tft-bezel {
+    background: #000;
+    padding: 8px;
+    border-radius: 8px;
+    border: 2px solid #4b5563;
+  }
+  .tft-screen {
+    width: 480px;
+    height: 384px;
+    background: #000000;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .top-bar {
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    border-bottom: 3px solid #ffffff;
+    font-size: 20px;
+    font-weight: bold;
+    color: #fff;
+  }
+  .top-left { display: flex; align-items: center; gap: 10px; }
+  .top-dot { width: 16px; height: 16px; border-radius: 50%; background: #ffe600; display: inline-block; }
+  .badge {
+    background: #000;
+    color: #ffe600;
+    padding: 4px 12px;
+    border-radius: 8px;
+    font-size: 17px;
+  }
+
+  .content {
+    height: 264px;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+  }
+  .card {
+    border: 2px solid #00ffff;
+    border-radius: 12px;
+    padding: 12px 16px;
+    position: relative;
+  }
+  .card.green { border-color: #00ff00; }
+  .card.yellow { border-color: #ffe600; }
+  .card-label { font-size: 14px; color: #00ffff; margin-bottom: 4px; }
+  .card-big { font-size: 34px; font-weight: bold; color: #00ff00; letter-spacing: 1px; }
+  .status-line { font-size: 16px; color: #ffe600; margin-top: 4px; }
+
+  .mode-dots { position: absolute; right: 16px; top: 14px; display: flex; gap: 8px; }
+  .dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #475569; }
+  .dot.on { background: #00ff00; border-color: #00ff00; }
+
+  .menu-item {
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 16px;
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    line-height: 1.25;
+  }
+  .menu-item.selected { background: #00ffff; color: #000000; font-weight: bold; }
+
+  .sensor-row { display: flex; align-items: center; justify-content: space-between; font-size: 16px; }
+  .bar-wrap { width: 150px; height: 22px; border: 2px solid #475569; background: #000; }
+  .bar-fill { height: 100%; background: #00ffff; }
+  .bar-fill.line { background: #00ff00; }
+
+  .bottom-bar {
+    height: 60px;
+    background: #181c24;
+    border-top: 2px solid #394150;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 18px;
+    font-size: 18px;
+    font-weight: bold;
+  }
+  .hint-left { color: #00ffff; }
+  .hint-right { color: #ffe600; }
+
+  .hw-buttons { display: flex; gap: 14px; align-items: center; }
+  .hw-btn {
+    background: #334155;
+    color: #fff;
+    border: 2px solid #64748b;
+    border-radius: 50px;
+    padding: 10px 20px;
+    font-size: 13px;
+    font-weight: bold;
+    cursor: pointer;
+    font-family: system-ui, sans-serif;
+  }
+  .hw-btn:active { transform: scale(0.96); background: #0284c7; }
+  .hw-btn.ab { background: #b45309; border-color: #f59e0b; }
+
+  /* Simulator Controls Panel */
+  .sim-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px 18px;
+    width: 380px;
+    font-family: system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .sim-panel h3 { margin: 0; font-size: 15px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  .sim-group { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+  .sim-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .sim-row input[type="range"] { flex: 1; }
+  .sim-row input[type="number"] { width: 68px; background: #0f172a; color: #fff; border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; }
+  .compass {
+    width: 64px; height: 64px; border-radius: 50%; border: 2px solid var(--accent);
+    position: relative; margin: 4px auto; background: #0f172a;
+  }
+  .compass-needle {
+    position: absolute; left: 50%; top: 50%; width: 4px; height: 26px;
+    background: #22c55e; transform-origin: bottom center;
+    margin-left: -2px; margin-top: -26px; border-radius: 2px;
+  }
+</style>
+</head>
+<body>
+  <h1>PT-BOT Atom VX — Interactive UI Simulator</h1>
+  <div class="sub">จำลองหน้าจอ TFT 160×128 พร้อมไอคอน + ใส่ค่าทดลอง IMU / Sensor / Encoder / 30cm ได้จริง</div>
+
+  <div class="tabs">
+    <button class="tab active" onclick="showScreen('ready')">Ready-to-Run</button>
+    <button class="tab" onclick="showScreen('running')">Mission Running</button>
+    <button class="tab" onclick="showScreen('done')">Mission Done</button>
+    <button class="tab" onclick="showScreen('assembly')">Assembly Menu</button>
+    <button class="tab" onclick="showScreen('sensor')">1. Sensor</button>
+    <button class="tab" onclick="showScreen('servoMenu')">2. Servo Menu</button>
+    <button class="tab" onclick="showScreen('servo')">2.1 Edit Servo</button>
+    <button class="tab" onclick="showScreen('imu')">3. IMU</button>
+    <button class="tab" onclick="showScreen('encoder')">4. Encoder</button>
+    <button class="tab" onclick="showScreen('dist30')">4.1 Cal 30cm</button>
+    <button class="tab" onclick="showScreen('setup')">5. Run Setup</button>
+  </div>
+
+  <div class="layout">
+    <div class="board-frame">
+      <div class="tft-bezel">
+        <div class="tft-screen" id="screen"></div>
+      </div>
+      <div class="hw-buttons">
+        <button class="hw-btn" onclick="simPress('A')">SW A (Run / -)</button>
+        <button class="hw-btn" onclick="simPress('B')">SW B (Mode / +)</button>
+        <button class="hw-btn ab" onclick="simPress('AB')">A + B (OK / Save)</button>
+      </div>
+    </div>
+
+    <div class="sim-panel">
+      <h3>ค่าทดลองจำลอง (Live Test Inputs)</h3>
+
+      <div class="sim-group">
+        <div class="sim-row">
+          <label><input type="checkbox" id="chkMulti" checked onchange="render()"> Multi-Mode (1-3)</label>
+          <label><input type="checkbox" id="chkShowCmd" checked onchange="render()"> Show Cmd</label>
+          <label><input type="checkbox" id="chkBeep" checked onchange="render()"> Beep</label>
+        </div>
+      </div>
+
+      <div class="sim-group">
+        <strong>ทิศ IMU (Yaw / Pitch / Roll)</strong>
+        <div class="sim-row">
+          <span>Yaw:</span>
+          <input type="range" id="inYaw" min="0" max="360" step="0.5" value="90" oninput="syncVal('Yaw')">
+          <input type="number" id="numYaw" min="0" max="360" step="0.5" value="90" oninput="syncRange('Yaw')">
+        </div>
+        <div class="compass"><div class="compass-needle" id="needle"></div></div>
+      </div>
+
+      <div class="sim-group">
+        <strong>เซนเซอร์เส้น 4 ตัว (Threshold = <span id="lblThr">500</span>)</strong>
+        <div class="sim-row"><span>S0 (FL):</span><input type="range" id="s0" min="0" max="1023" value="210" oninput="render()"><span id="v0">210</span></div>
+        <div class="sim-row"><span>S1 (FR):</span><input type="range" id="s1" min="0" max="1023" value="830" oninput="render()"><span id="v1">830</span></div>
+        <div class="sim-row"><span>S2 (BR):</span><input type="range" id="s2" min="0" max="1023" value="790" oninput="render()"><span id="v2">790</span></div>
+        <div class="sim-row"><span>S3 (BL):</span><input type="range" id="s3" min="0" max="1023" value="245" oninput="render()"><span id="v3">245</span></div>
+      </div>
+
+      <div class="sim-group">
+        <strong>จำลองไอคอนคำสั่ง (Mission Running)</strong>
+        <div class="sim-row">
+          <select id="selCmdIcon" onchange="previewActionIcon()" style="width:100%;background:#0f172a;color:#fff;border:1px solid #334155;border-radius:4px;padding:4px 6px">
+            <option value="auto">Auto Cycle (ตัวอย่างภารกิจ + STOP)</option>
+            <option value="fwd">FC — เดินหน้า (↑)</option>
+            <option value="bwd">BC — ถอยหลัง (↓)</option>
+            <option value="spinL">SpinDegree(-) — หมุนซ้าย (←)</option>
+            <option value="spinR">SpinDegree(+) — หมุนขวา (→)</option>
+            <option value="turnFL">TrunDegreeFront(-) — เลี้ยวหน้าซ้าย</option>
+            <option value="turnFR">TrunDegreeFront(+) — เลี้ยวหน้าขวา</option>
+            <option value="turnBL">TrunDegreeBack(-) — เลี้ยวหลังซ้าย</option>
+            <option value="turnBR">TrunDegreeBack(+) — เลี้ยวหลังขวา</option>
+            <option value="lineF">SetF — เช็คเส้นหน้า (เส้นกระพริบ)</option>
+            <option value="lineB">SetB — เช็คเส้นหลัง (เส้นกระพริบ)</option>
+            <option value="dropF">DropF — ลูกบาศก์ 3D + ปล่อยหน้า</option>
+            <option value="dropB">DropB — ลูกบาศก์ 3D + ปล่อยหลัง</option>
+            <option value="pause">STOP(); — หยุดรอปุ่ม &amp; หยุดเวลา</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="sim-group">
+        <strong>ระยะ Encoder &amp; Calibration (30 cm)</strong>
+        <div class="sim-row">
+          <span>Ticks/cm:</span>
+          <input type="range" id="inTpcm" min="5" max="40" step="0.1" value="15.0" oninput="render()">
+          <span id="lblTpcm">15.0</span>
+        </div>
+        <div class="sim-row">
+          <span>Simulated Ticks:</span>
+          <input type="number" id="inTicks" value="450" oninput="render()">
+          <span>(= <b id="lblEstCm">30.0</b> cm)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  let currentScreen = 'ready';
+  let modeNum = 1;
+  let asmIdx = 0;
+  let distIdx = 0;
+  let servoAngle = 90;
+  let servoMenuIdx = 0;
+  let setupIdx = 0;
+  let simTimer = null;
+  let simSec = 0;
+  let simPaused = false;
+  let simBlink = true;
+  let calCountdown = 0;
+
+  function cmdSvg(type, blinkOn = true) {
+    switch (type) {
+      case 'fwd': return `<svg width="72" height="72" viewBox="0 0 42 42"><rect x="18" y="17" width="7" height="16" fill="#00ff00"/><polygon points="21,6 11,18 31,18" fill="#00ff00"/></svg>`;
+      case 'bwd': return `<svg width="72" height="72" viewBox="0 0 42 42"><rect x="18" y="9" width="7" height="16" fill="#ffe600"/><polygon points="21,36 11,24 31,24" fill="#ffe600"/></svg>`;
+      case 'spinL': return `<svg width="72" height="72" viewBox="0 0 42 42"><rect x="17" y="18" width="16" height="7" fill="#00ffff"/><polygon points="6,21 18,11 18,31" fill="#00ffff"/></svg>`;
+      case 'spinR': return `<svg width="72" height="72" viewBox="0 0 42 42"><rect x="9" y="18" width="16" height="7" fill="#00ffff"/><polygon points="36,21 24,11 24,31" fill="#00ffff"/></svg>`;
+      case 'turnFL': return `<svg width="72" height="72" viewBox="0 0 42 42"><rect x="25" y="15" width="4" height="20" fill="#00ffff"/><rect x="15" y="13" width="14" height="4" fill="#00ffff"/><polygon points="6,15 16,8 16,22" fill="#00ffff"/></svg>`;
+      case 'turnFR': return `<svg width="72" height="72" viewBox="0 0 42 42"><rect x="13" y="15" width="4" height="20" fill="#00ffff"/><rect x="13" y="13" width="14" height="4" fill="#00ffff"/><polygon points="36,15 26,8 26,22" fill="#00ffff"/></svg>`;
+      case 'turnBL': return `<svg width="72" height="72" viewBox="0 0 42 42"><rect x="25" y="7" width="4" height="20" fill="#ffe600"/><rect x="15" y="25" width="14" height="4" fill="#ffe600"/><polygon points="6,27 16,20 16,34" fill="#ffe600"/></svg>`;
+      case 'turnBR': return `<svg width="72" height="72" viewBox="0 0 42 42"><rect x="13" y="7" width="4" height="20" fill="#ffe600"/><rect x="13" y="25" width="14" height="4" fill="#ffe600"/><polygon points="36,27 26,20 26,34" fill="#ffe600"/></svg>`;
+      case 'lineF': return `<svg width="72" height="72" viewBox="0 0 42 42">${blinkOn?'<rect x="4" y="3" width="34" height="4" fill="#ffffff"/>':''}<rect x="18" y="20" width="7" height="14" fill="#00ff00"/><polygon points="21,12 12,22 30,22" fill="#00ff00"/></svg>`;
+      case 'lineB': return `<svg width="72" height="72" viewBox="0 0 42 42">${blinkOn?'<rect x="4" y="35" width="34" height="4" fill="#ffffff"/>':''}<rect x="18" y="8" width="7" height="14" fill="#ffe600"/><polygon points="21,30 12,20 30,20" fill="#ffe600"/></svg>`;
+      case 'dropF': return `<svg width="72" height="72" viewBox="0 0 42 42"><g stroke="#ffe600" stroke-width="1.6" fill="none"><polygon points="12,11 21,16 21,26 12,31 3,26 3,16"/><polyline points="3,16 12,21 21,16"/><line x1="12" y1="21" x2="12" y2="31"/></g><rect x="30" y="19" width="5" height="13" fill="#00ff00"/><polygon points="32,8 25,19 39,19" fill="#00ff00"/></svg>`;
+      case 'dropB': return `<svg width="72" height="72" viewBox="0 0 42 42"><g stroke="#ffe600" stroke-width="1.6" fill="none"><polygon points="12,11 21,16 21,26 12,31 3,26 3,16"/><polyline points="3,16 12,21 21,16"/><line x1="12" y1="21" x2="12" y2="31"/></g><rect x="30" y="10" width="5" height="13" fill="#ffe600"/><polygon points="32,34 25,23 39,23" fill="#ffe600"/></svg>`;
+      case 'pause': return `<svg width="72" height="72" viewBox="0 0 42 42"><rect x="12" y="9" width="6" height="24" rx="2" fill="#ef4444"/><rect x="24" y="9" width="6" height="24" rx="2" fill="#ef4444"/></svg>`;
+      case 'clock': return `<svg width="72" height="72" viewBox="0 0 42 42"><circle cx="21" cy="21" r="13" stroke="#00ffff" stroke-width="2.5" fill="none"/><circle cx="21" cy="21" r="2.2" fill="#ffe600"/><line x1="21" y1="21" x2="21" y2="12" stroke="#ffe600" stroke-width="2.2" stroke-linecap="round"/><line x1="21" y1="21" x2="27" y2="24" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round"/></svg>`;
+      default: return '';
+    }
+  }
+
+  function previewActionIcon() {
+    if (currentScreen !== 'running') showScreen('running');
+    else render();
+  }
+
+  const asmIcons = [
+    `<svg width="18" height="18" viewBox="0 0 10 10"><rect x="1" y="5" width="2" height="4" fill="currentColor"/><rect x="4" y="3" width="2" height="6" fill="currentColor"/><rect x="7" y="1" width="2" height="8" fill="currentColor"/></svg>`,
+    `<svg width="18" height="18" viewBox="0 0 10 10"><circle cx="3" cy="6" r="2.5" stroke="currentColor" fill="none"/><line x1="3" y1="6" x2="8" y2="1" stroke="currentColor" stroke-width="1.5"/></svg>`,
+    `<svg width="18" height="18" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" stroke="currentColor" fill="none"/><polygon points="5,2 3,6 7,6" fill="currentColor"/></svg>`,
+    `<svg width="18" height="18" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" stroke="currentColor" fill="none"/><circle cx="5" cy="5" r="1.5" fill="currentColor"/></svg>`,
+    `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3.5"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01A1.65 1.65 0 0 0 10 3.09V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
+    `<svg width="18" height="18" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" stroke="currentColor" fill="none"/><polygon points="4,3 4,7 7,5" fill="currentColor"/></svg>`
+  ];
+
+  function syncVal(k) { document.getElementById('num' + k).value = document.getElementById('in' + k).value; render(); }
+  function syncRange(k) { document.getElementById('in' + k).value = document.getElementById('num' + k).value; render(); }
+
+  function stopSimTimer() { if (simTimer) { clearInterval(simTimer); simTimer = null; } }
+
+  function showScreen(name) {
+    stopSimTimer();
+    currentScreen = name;
+    document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+    const match = Array.from(document.querySelectorAll('.tab')).find(b => b.getAttribute('onclick').includes(`'${name}'`));
+    if (match) match.classList.add('active');
+
+    if (name === 'running') {
+      simSec = 0;
+      simPaused = false;
+      let tickCount = 0;
+      simTimer = setInterval(() => {
+        tickCount++;
+        if (tickCount % 2 === 0) simBlink = !simBlink;
+        const sel = document.getElementById('selCmdIcon').value;
+        if (sel === 'auto') {
+          if (!simPaused) {
+            simSec += 0.1;
+            if (Math.abs(simSec - 3.0) < 0.05) simPaused = true;
+            if (simSec >= 6.5) { showScreen('done'); return; }
+          }
+        } else if (sel === 'pause') {
+          simPaused = true;
+        } else {
+          simPaused = false;
+        }
+        render();
+      }, 100);
+    }
+    render();
+  }
+
+  function render() {
+    const multi = document.getElementById('chkMulti').checked;
+    const showCmd = document.getElementById('chkShowCmd').checked;
+    const beep = document.getElementById('chkBeep').checked;
+    const yaw = parseFloat(document.getElementById('inYaw').value) || 0;
+    const tpcm = parseFloat(document.getElementById('inTpcm').value) || 15;
+    const ticks = parseFloat(document.getElementById('inTicks').value) || 0;
+    const estCm = (ticks / tpcm).toFixed(1);
+
+    document.getElementById('needle').style.transform = `rotate(${yaw}deg)`;
+    document.getElementById('lblTpcm').innerText = tpcm.toFixed(1);
+    document.getElementById('lblEstCm').innerText = estCm;
+
+    const sen = [0,1,2,3].map(i => {
+      const v = parseInt(document.getElementById('s' + i).value, 10);
+      document.getElementById('v' + i).innerText = v;
+      return v;
+    });
+
+    const el = document.getElementById('screen');
+    if (currentScreen === 'ready') {
+      const dots = [1,2,3].map(m => `<span class="dot ${m === modeNum ? 'on' : ''}"></span>`).join('');
+      el.innerHTML = `
+        <div class="top-bar" style="background:#0046aa">
+          <div class="top-left"><span class="top-dot"></span><span>KT-BOT READY</span></div>
+          <span class="badge">${multi ? 'M'+modeNum+'/3' : '1-MODE'}</span>
+        </div>
+        <div class="content">
+          <div class="card ${multi ? '' : 'green'}">
+            ${multi ? `<div class="mode-dots">${dots}</div>` : ''}
+            <div class="card-label">${multi ? 'SELECT' : 'SINGLE MODE'}</div>
+            <div class="card-big">▶ ${multi ? 'MODE ' + modeNum : 'READY!'}</div>
+          </div>
+          <div class="status-line">CMD:${showCmd?'ON':'OFF'} &nbsp; BEEP:${beep?'ON':'OFF'}</div>
+        </div>
+        <div class="bottom-bar"><span class="hint-left">[A] RUN</span><span class="hint-right">${multi ? '[B] MODE' : '[B] RUN'}</span></div>`;
+    } else if (currentScreen === 'running') {
+      const sel = document.getElementById('selCmdIcon').value;
+      const autoSeq = [
+        ['fwd',   "FC(60,30,'R');", "FC(60,30)"],
+        ['spinR', "FC(60,30,'R');", "Spin(90)"],
+        ['lineF', "DropF(20);",     "SetF(20)"],
+        ['dropF', "DropF(20);",     "DropF()"],
+        ['bwd',   "DropF(20);",     "BC(20,5)"],
+        ['pause', "STOP();",        "PAUSED"]
+      ];
+      let iconType = sel, cmd = '', subCmd = '';
+      if (sel === 'auto') {
+        const idx = Math.min(autoSeq.length - 1, Math.floor(simSec));
+        iconType = autoSeq[idx][0];
+        cmd      = autoSeq[idx][1];
+        subCmd   = autoSeq[idx][2];
+      } else {
+        const labels = {
+          fwd:['FC(60,30);',''], bwd:['BC(50,30);',''], spinL:['SpinDegree(-90);',''], spinR:['SpinDegree(90);',''],
+          turnFL:["FC(60,30,'l');",'TurnF(-90)'], turnFR:["FC(60,30,'r');",'TurnF(90)'],
+          turnBL:["BC(50,30,'l');",'TurnB(-90)'], turnBR:["BC(50,30,'r');",'TurnB(90)'],
+          lineF:['SetF(25);',''], lineB:['SetB(25);',''], dropF:['DropF(20);','DropF()'], dropB:['DropB(20);','DropB()'],
+          clock:['DELAY(500);','__BAR__'], pause:['STOP();','PAUSED']
+        };
+        [cmd, subCmd] = labels[sel] || [sel, ''];
+      }
+      const barPct = Math.round((1 - (simSec % 1)) * 100);
+      el.innerHTML = `
+        <div class="top-bar" style="background:#007a00">
+          <div class="top-left"><span class="top-dot"></span><span>RUN : MODE ${modeNum}</span></div>
+          <span class="badge">${simSec.toFixed(2).padStart(5,' ')}s</span>
+        </div>
+        <div class="content">
+          ${(showCmd || iconType === 'pause')
+            ? `<div class="card yellow" style="padding:14px 16px; border-radius:18px; border-color:${iconType==='pause'?'#ef4444':'#ffe600'}; display:flex; align-items:center; gap:18px; height:216px">
+                 <div style="width:104px; height:104px; border-radius:16px; background:#0b1528; border:2px solid #294666; display:flex; align-items:center; justify-content:center; flex-shrink:0">${cmdSvg(iconType, simBlink)}</div>
+                 <div style="flex:1; min-width:0">
+                   <div class="card-label" style="color:${iconType==='pause'?'#ef4444':'#ffe600'}">${iconType==='pause'?'SYSTEM PAUSED':'ACTIVE COMMAND'}</div>
+                   <div style="font-size:21px;font-weight:bold;color:#fff;margin-top:6px">${iconType==='pause' && !showCmd ? 'PAUSE' : cmd}</div>
+                   ${subCmd === '__BAR__'
+                     ? `<div style="margin-top:12px;height:18px;border:2px solid #294666;border-radius:8px;background:#09101d;overflow:hidden"><div style="width:${barPct}%;height:100%;background:#00ffff"></div></div>`
+                     : (subCmd ? `<div style="display:inline-block;margin-top:10px;padding:4px 12px;border-radius:10px;background:${iconType==='pause'?'rgba(239,68,68,0.22)':'rgba(56,189,248,0.18)'};color:${iconType==='pause'?'#f87171':'#38bdf8'};font-size:15px;font-weight:bold">&gt; ${subCmd}</div>` : '')}
+                 </div>
+               </div>`
+            : `<div style="display:flex;align-items:center;justify-content:center;height:100%"><div style="font-size:64px;font-weight:900;letter-spacing:4px"><span style="color:#e2e8f0">K</span><span style="color:#0284c7">T</span></div></div>`}
+        </div>
+        <div class="bottom-bar"><span class="hint-left">${simPaused ? 'PAUSED!' : 'IMU: '+yaw.toFixed(0)+'°'}</span><span class="hint-right">${simPaused ? '[A/B] Resume' : (showCmd ? 'CMD ON' : 'LOGO')}</span></div>`;
+    } else if (currentScreen === 'done') {
+      el.innerHTML = `
+        <div class="top-bar" style="background:#007a00">
+          <div class="top-left"><span class="top-dot"></span><span>MISSION DONE</span></div><span class="badge">OK</span>
+        </div>
+        <div class="content">
+          <div class="card green"><div class="card-label">MODE ${modeNum} TOTAL TIME:</div><div class="card-big">${(simSec || 4.00).toFixed(2).padStart(6,' ')} s</div></div>
+        </div>
+        <div class="bottom-bar"><span class="hint-left">[A/B] Ready</span><span class="hint-right">DONE</span></div>`;
+    } else if (currentScreen === 'assembly') {
+      const shortNames = ['LINE', 'SERVO', 'IMU', 'ENC', 'SETUP', 'EXIT'];
+      const descText = [
+        'Calibrate Line Sensors',
+        'Front/Back Servo Angle',
+        'Read & Reset IMU Yaw',
+        'Encoder & Cal 30cm',
+        'Show Cmd & Beep (Flash)',
+        'Go to Ready-to-Run'
+      ];
+      el.innerHTML = `
+        <div class="top-bar" style="background:#c25000"><div class="top-left"><span class="top-dot"></span><span>ASSEMBLY MODE</span></div><span class="badge">${asmIdx+1}/6</span></div>
+        <div class="content" style="padding:10px 14px; justify-content:space-between">
+          <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:10px">
+            ${shortNames.map((t, i) => `
+              <div style="height:98px; border-radius:10px; border:2px solid ${i===asmIdx?'#ffe600':'#394150'}; background:${i===asmIdx?'#00ffff':'#0b1220'}; color:${i===asmIdx?'#000':'#fff'}; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; font-weight:bold; font-size:16px">
+                <div style="transform:scale(1.6); color:${i===asmIdx?'#000':'#00ffff'}">${asmIcons[i]}</div>
+                <span>${t}</span>
+              </div>`).join('')}
+          </div>
+          <div style="text-align:center; color:#ffe600; font-size:15px">${descText[asmIdx]}</div>
+        </div>
+        <div class="bottom-bar"><span class="hint-left">[A/B] Move</span><span class="hint-right">[A+B] Open</span></div>`;
+    } else if (currentScreen === 'sensor') {
+      if (calCountdown > 0) {
+        el.innerHTML = `
+          <div class="top-bar" style="background:#c25000"><div class="top-left"><span class="top-dot"></span><span>SENSOR CAL</span></div><span class="badge">WAIT</span></div>
+          <div class="content" style="align-items:center"><div class="card yellow" style="width:85%;text-align:center"><div class="card-label">Hands off robot!</div><div class="card-big" style="font-size:64px;color:#ffe600">${calCountdown}</div></div></div>
+          <div class="bottom-bar"><span class="hint-left">[A/B] Cancel</span><span class="hint-right">3s COUNT</span></div>`;
+      } else {
+        el.innerHTML = `
+          <div class="top-bar" style="background:#0046aa"><div class="top-left"><span class="top-dot"></span><span>1. SENSOR</span></div><span class="badge">LINE</span></div>
+          <div class="content" style="gap:14px">
+            ${sen.map((v, i) => `<div class="sensor-row" style="color:${v < 500 ? '#00ff00' : '#fff'}"><span>S${i}:${String(v).padStart(4,' ')} T:500</span><div class="bar-wrap"><div class="bar-fill ${v < 500 ? 'line' : ''}" style="width:${Math.round(v/1023*100)}%"></div></div></div>`).join('')}
+          </div>
+          <div class="bottom-bar"><span class="hint-left">[A+B] Cal (3s)</span><span class="hint-right">[A/B] Back</span></div>`;
+      }
+    } else if (currentScreen === 'servoMenu') {
+      const sCards = [['F.LOCK', '90 deg'], ['F.DROP', '140 deg'], ['B.LOCK', '90 deg'], ['B.DROP', '140 deg']];
+      el.innerHTML = `
+        <div class="top-bar" style="background:#0046aa"><div class="top-left"><span class="top-dot"></span><span>2. SETUP SERVO</span></div><span class="badge">S0/S1</span></div>
+        <div class="content" style="gap:8px; justify-content:flex-start; padding-top:10px">
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px">
+            ${sCards.map(([t, v], i) => `
+              <div style="padding:10px 12px; border-radius:8px; border:2px solid ${i===servoMenuIdx?'#ffe600':'#475569'}; background:${i===servoMenuIdx?'#00ffff':'#0b1220'}; color:${i===servoMenuIdx?'#000':'#fff'}; font-weight:bold">
+                <div style="font-size:13px; color:${i===servoMenuIdx?'#000':'#00ffff'}">${t}</div>
+                <div style="font-size:18px; color:${i===servoMenuIdx?'#000':'#00ff00'}; margin-top:4px">${v}</div>
+              </div>`).join('')}
+          </div>
+          <div style="padding:6px 14px; border-radius:6px; border:2px solid ${servoMenuIdx===4?'#ffe600':'#475569'}; background:${servoMenuIdx===4?'#00ffff':'#0b1220'}; color:${servoMenuIdx===4?'#000':'#fff'}; text-align:center; font-weight:bold; font-size:14px">&lt;- BACK</div>
+        </div>
+        <div class="bottom-bar"><span class="hint-left">[A/B] Move</span><span class="hint-right">[A+B] Edit</span></div>`;
+    } else if (currentScreen === 'servo') {
+      const pct = (servoAngle / 180) * 100;
+      const fillLeft = servoAngle >= 90 ? 50 : pct;
+      const fillWidth = Math.abs(pct - 50);
+      const fillColor = servoAngle >= 90 ? '#00ffff' : '#ffe600';
+      el.innerHTML = `
+        <div class="top-bar" style="background:#0046aa"><div class="top-left"><span class="top-dot"></span><span>FRONT LOCK</span></div><span class="badge">0-180</span></div>
+        <div class="content" style="align-items:center; gap:14px">
+          <div class="card" style="width:90%; text-align:center; padding:12px">
+            <div class="card-big" style="font-size:48px">${String(servoAngle).padStart(3,' ')}°</div>
+          </div>
+          <div style="width:90%; position:relative">
+            <div style="height:26px; border:2px solid #475569; border-radius:6px; background:#0b1220; position:relative; overflow:hidden">
+              <div style="position:absolute; left:${fillLeft}%; width:${fillWidth}%; top:3px; bottom:3px; background:${fillColor}"></div>
+              <div style="position:absolute; left:50%; top:0; bottom:0; width:2px; background:#fff"></div>
+              <div style="position:absolute; left:calc(${pct}% - 6px); top:0; bottom:0; width:12px; border-radius:4px; background:#00ff00"></div>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:14px; color:#fff; margin-top:4px">
+              <span>0°</span><span>90°</span><span>180°</span>
+            </div>
+          </div>
+        </div>
+        <div class="bottom-bar"><span class="hint-left">[A]-1  [B]+1</span><span class="hint-right">[A+B] Save</span></div>`;
+    } else if (currentScreen === 'imu') {
+      el.innerHTML = `
+        <div class="top-bar" style="background:#0046aa"><div class="top-left"><span class="top-dot"></span><span>3. READ IMU</span></div><span class="badge">DEG</span></div>
+        <div class="content" style="gap:10px">
+          <div class="card green" style="padding:10px 16px; display:flex; justify-content:space-between; align-items:center">
+            <span style="color:#00ffff; font-size:16px">YAW</span>
+            <span style="color:#00ff00; font-size:32px; font-weight:bold">${yaw.toFixed(1)}</span>
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px">
+            <div class="card" style="border-color:#475569; padding:10px 14px"><div class="card-label">PITCH</div><div style="font-size:20px;color:#fff">0.8</div></div>
+            <div class="card" style="border-color:#475569; padding:10px 14px"><div class="card-label">ROLL</div><div style="font-size:20px;color:#fff">-0.4</div></div>
+          </div>
+        </div>
+        <div class="bottom-bar"><span class="hint-left">[A] Reset</span><span class="hint-right">[B] Back</span></div>`;
+    } else if (currentScreen === 'encoder') {
+      const t = Math.round(ticks);
+      el.innerHTML = `
+        <div class="top-bar" style="background:#0046aa"><div class="top-left"><span class="top-dot"></span><span>4. ENCODER</span></div><span class="badge">T / CM</span></div>
+        <div class="content" style="gap:8px">
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px">
+            <div class="card" style="border-color:#475569; padding:8px 12px">
+              <div style="display:flex;justify-content:space-between;font-size:15px"><span style="color:#00ffff">M1:</span><span style="color:#fff">${t}</span></div>
+              <div style="font-size:18px;color:#00ff00;font-weight:bold;margin-top:4px">${estCm} cm</div>
+            </div>
+            <div class="card" style="border-color:#475569; padding:8px 12px">
+              <div style="display:flex;justify-content:space-between;font-size:15px"><span style="color:#00ffff">M3:</span><span style="color:#fff">${t}</span></div>
+              <div style="font-size:18px;color:#00ff00;font-weight:bold;margin-top:4px">${estCm} cm</div>
+            </div>
+            <div class="card" style="border-color:#475569; padding:8px 12px">
+              <div style="display:flex;justify-content:space-between;font-size:15px"><span style="color:#00ffff">M2:</span><span style="color:#fff">${t}</span></div>
+              <div style="font-size:18px;color:#00ff00;font-weight:bold;margin-top:4px">${estCm} cm</div>
+            </div>
+            <div class="card" style="border-color:#475569; padding:8px 12px">
+              <div style="display:flex;justify-content:space-between;font-size:15px"><span style="color:#00ffff">M4:</span><span style="color:#fff">${t}</span></div>
+              <div style="font-size:18px;color:#00ff00;font-weight:bold;margin-top:4px">${estCm} cm</div>
+            </div>
+          </div>
+          <div class="card green" style="padding:6px 12px; display:flex; justify-content:space-between; font-size:16px">
+            <span style="color:#00ff00">AVG:</span><span style="color:#00ff00;font-weight:bold">${t}t | ${estCm}cm</span>
+          </div>
+        </div>
+        <div class="bottom-bar"><span class="hint-left">[A]0 [B]Back</span><span class="hint-right">[A+B]Cal30</span></div>`;
+    } else if (currentScreen === 'dist30') {
+      const dItems = [
+        ['1. PUSH 30CM', 'Roll & Cap'],
+        ['2. TEST 30CM', 'Run & Check'],
+        ['3. TUNE RATE', `${tpcm.toFixed(1)} t/cm`]
+      ];
+      el.innerHTML = `
+        <div class="top-bar" style="background:#0046aa"><div class="top-left"><span class="top-dot"></span><span>5. CAL 30CM</span></div><span class="badge">${estCm}cm</span></div>
+        <div class="content" style="gap:8px; justify-content:flex-start; padding-top:10px">
+          ${dItems.map(([t, s], i) => `
+            <div style="padding:10px 14px; border-radius:8px; border:2px solid ${i===distIdx?'#ffe600':'#475569'}; background:${i===distIdx?'#00ffff':'#0b1220'}; color:${i===distIdx?'#000':'#fff'}; display:flex; justify-content:space-between; font-weight:bold; font-size:15px">
+              <span>${t}</span><span style="color:${i===distIdx?'#000':'#ffe600'}">${s}</span>
+            </div>`).join('')}
+          <div style="padding:6px 14px; border-radius:6px; border:2px solid ${distIdx===3?'#ffe600':'#475569'}; background:${distIdx===3?'#00ffff':'#0b1220'}; color:${distIdx===3?'#000':'#fff'}; text-align:center; font-weight:bold; font-size:14px">&lt;- BACK</div>
+        </div>
+        <div class="bottom-bar"><span class="hint-left">[A/B] Move</span><span class="hint-right">[A+B] OK</span></div>`;
+    } else if (currentScreen === 'setup') {
+      const rows = [['SHOW CMD', showCmd], ['CMD BEEP', beep]];
+      el.innerHTML = `
+        <div class="top-bar" style="background:#0046aa"><div class="top-left"><span class="top-dot"></span><span>5. RUN SETUP</span></div><span class="badge">CFG</span></div>
+        <div class="content" style="gap:10px; justify-content:flex-start; padding-top:12px">
+          ${rows.map(([lbl, st], i) => `
+            <div style="padding:12px 14px; border-radius:8px; border:2px solid ${i===setupIdx?'#ffe600':'#475569'}; background:${i===setupIdx?'#00ffff':'#0b1220'}; color:${i===setupIdx?'#000':'#fff'}; display:flex; justify-content:space-between; align-items:center; font-weight:bold; font-size:16px">
+              <span>${lbl}</span>
+              <span style="padding:4px 12px; border-radius:6px; background:${st?'#00ff00':'#ef4444'}; color:#000">${st?'ON':'OFF'}</span>
+            </div>`).join('')}
+          <div style="padding:6px 14px; border-radius:6px; border:2px solid ${setupIdx===2?'#ffe600':'#475569'}; background:${setupIdx===2?'#00ffff':'#0b1220'}; color:${setupIdx===2?'#000':'#fff'}; text-align:center; font-weight:bold; font-size:14px">&lt;- BACK</div>
+        </div>
+        <div class="bottom-bar"><span class="hint-left">[A/B] Move</span><span class="hint-right">[A+B] Toggle</span></div>`;
+    }
+  }
+
+  function simPress(btn) {
+    if (currentScreen === 'ready') {
+      const multi = document.getElementById('chkMulti').checked;
+      if (btn === 'B' && multi) { modeNum = (modeNum % 3) + 1; render(); }
+      else if (btn === 'A' || (btn === 'B' && !multi)) { showScreen('running'); }
+    } else if (currentScreen === 'running') {
+      if (simPaused && (btn === 'A' || btn === 'B')) { simPaused = false; simSec += 0.2; render(); }
+    } else if (currentScreen === 'done') {
+      showScreen('ready');
+    } else if (currentScreen === 'assembly') {
+      if (btn === 'A') { asmIdx = (asmIdx + 5) % 6; render(); }
+      if (btn === 'B') { asmIdx = (asmIdx + 1) % 6; render(); }
+      if (btn === 'AB') {
+        const map = ['sensor', 'servoMenu', 'imu', 'encoder', 'setup', 'ready'];
+        showScreen(map[asmIdx]);
+      }
+    } else if (currentScreen === 'servoMenu') {
+      if (btn === 'A') { servoMenuIdx = (servoMenuIdx + 4) % 5; render(); }
+      if (btn === 'B') { servoMenuIdx = (servoMenuIdx + 1) % 5; render(); }
+      if (btn === 'AB') { if (servoMenuIdx === 4) showScreen('assembly'); else showScreen('servo'); }
+    } else if (currentScreen === 'setup') {
+      if (btn === 'A') { setupIdx = (setupIdx + 2) % 3; render(); }
+      if (btn === 'B') { setupIdx = (setupIdx + 1) % 3; render(); }
+      if (btn === 'AB') {
+        if (setupIdx === 0) { document.getElementById('chkShowCmd').click(); }
+        else if (setupIdx === 1) { document.getElementById('chkBeep').click(); }
+        else showScreen('assembly');
+      }
+    } else if (currentScreen === 'sensor') {
+      if (btn === 'AB' && calCountdown === 0) {
+        calCountdown = 3; render();
+        const t = setInterval(() => {
+          calCountdown--;
+          render();
+          if (calCountdown <= 0) clearInterval(t);
+        }, 1000);
+      } else if (btn === 'A' || btn === 'B') { calCountdown = 0; showScreen('assembly'); }
+    } else if (currentScreen === 'servoMenu') {
+      const sCards = [['F.LOCK', '90 deg'], ['F.DROP', '140 deg'], ['B.LOCK', '90 deg'], ['B.DROP', '140 deg']];
+      el.innerHTML = `
+        <div class="top-bar" style="background:#0046aa"><div class="top-left"><span class="top-dot"></span><span>2. SETUP SERVO</span></div><span class="badge">S0/S1</span></div>
+        <div class="content" style="gap:8px; justify-content:flex-start; padding-top:10px">
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px">
+            ${sCards.map(([t, v], i) => `
+              <div style="padding:10px 12px; border-radius:8px; border:2px solid ${i===servoMenuIdx?'#ffe600':'#475569'}; background:${i===servoMenuIdx?'#00ffff':'#0b1220'}; color:${i===servoMenuIdx?'#000':'#fff'}; font-weight:bold">
+                <div style="font-size:13px; color:${i===servoMenuIdx?'#000':'#00ffff'}">${t}</div>
+                <div style="font-size:18px; color:${i===servoMenuIdx?'#000':'#00ff00'}; margin-top:4px">${v}</div>
+              </div>`).join('')}
+          </div>
+          <div style="padding:6px 14px; border-radius:6px; border:2px solid ${servoMenuIdx===4?'#ffe600':'#475569'}; background:${servoMenuIdx===4?'#00ffff':'#0b1220'}; color:${servoMenuIdx===4?'#000':'#fff'}; text-align:center; font-weight:bold; font-size:14px">&lt;- BACK</div>
+        </div>
+        <div class="bottom-bar"><span class="hint-left">[A/B] Move</span><span class="hint-right">[A+B] Edit</span></div>`;
+    } else if (currentScreen === 'servo') {
+      if (btn === 'A') { servoAngle = Math.max(0, servoAngle - 1); render(); }
+      if (btn === 'B') { servoAngle = Math.min(180, servoAngle + 1); render(); }
+      if (btn === 'AB') showScreen('assembly');
+    } else if (currentScreen === 'imu') {
+      if (btn === 'A') { document.getElementById('inYaw').value = 0; document.getElementById('numYaw').value = 0; render(); }
+      else if (btn === 'B') showScreen('assembly');
+    } else if (currentScreen === 'encoder') {
+      if (btn === 'A') { document.getElementById('inTicks').value = 0; render(); }
+      else if (btn === 'B') showScreen('assembly');
+      else if (btn === 'AB') showScreen('dist30');
+    } else if (currentScreen === 'dist30') {
+      if (btn === 'A') { distIdx = (distIdx + 3) % 4; render(); }
+      if (btn === 'B') { distIdx = (distIdx + 1) % 4; render(); }
+      if (btn === 'AB' && distIdx === 3) showScreen('encoder');
+    }
+  }
+
+  showScreen('ready');
+</script>
+</body>
+</html>

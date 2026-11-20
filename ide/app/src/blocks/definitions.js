@@ -1,0 +1,479 @@
+'use strict';
+
+import { intLit, floatLit, charLit, boolLit, exprToCode } from './expressionAst.js';
+
+export const MISSION_DEFS = [
+  { file: 'RunMode1.ino', fn: 'runMode1()', title: 'Mission 1', sub: 'RunMode1.ino (Default)', bg: '#0f766e', dark: '#115e59', defaultX: 28, defaultY: 28 },
+  { file: 'RunMode2.ino', fn: 'runMode2()', title: 'Mission 2', sub: 'RunMode2.ino (Btn B x1)', bg: '#0369a1', dark: '#075985', defaultX: 528, defaultY: 28 },
+  { file: 'RunMode3.ino', fn: 'runMode3()', title: 'Mission 3', sub: 'RunMode3.ino (Btn B x2)', bg: '#1d4ed8', dark: '#1e3a8a', defaultX: 1028, defaultY: 28 }
+];
+
+export const MISSION_MAP = Object.fromEntries(MISSION_DEFS.map((m) => [m.file, m]));
+
+export const CATEGORIES = [
+  { id: 'all', label: 'All Blocks', icon: 'blocks', color: '#38bdf8' },
+  { id: 'mission', label: 'Missions', icon: 'play', color: '#0f766e' },
+  { id: 'vars', label: 'Variables', icon: 'code', color: '#b45309' },
+  { id: 'math', label: 'Math', icon: 'calc', color: '#0284c7' },
+  { id: 'logic', label: 'Logic', icon: 'logic', color: '#059669' },
+  { id: 'enc', label: 'Encoder Move', icon: 'move', color: '#0369a1' },
+  { id: 'spin', label: 'Gyro Spin', icon: 'turn', color: '#1e40af' },
+  { id: 'curve', label: 'Curve Encoder', icon: 'turn', color: '#0f766e' },
+  { id: 'time', label: 'Time Move', icon: 'gauge', color: '#0e7490' },
+  { id: 'line', label: 'Line & Drop', icon: 'line', color: '#15803d' },
+  { id: 'ctrl', label: 'Control', icon: 'settings', color: '#be123c' }
+];
+
+export const CAT_COLORS = {
+  vars: { bg: '#b45309', dark: '#92400e' },
+  math: { bg: '#0284c7', dark: '#0369a1' },
+  logic: { bg: '#059669', dark: '#047857' },
+  enc: { bg: '#0369a1', dark: '#075985' },
+  spin: { bg: '#1e40af', dark: '#1e3a8a' },
+  curve: { bg: '#0f766e', dark: '#115e59' },
+  time: { bg: '#0e7490', dark: '#155e75' },
+  line: { bg: '#15803d', dark: '#166534' },
+  ctrl: { bg: '#be123c', dark: '#9f1239' }
+};
+
+export function buildCommandDefs(getVariables) {
+  return [
+    {
+      type: 'FC_SIMPLE',
+      cat: 'enc',
+      title: 'FC',
+      sig: 'FC(speed, cm)',
+      desc: 'เดินหน้าตามระยะทาง (cm)',
+      defaults: { speed: 60, cm: 30, stop: true },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'cm', label: 'cm', type: 'number' },
+        { key: 'stop', label: 'stop', type: 'bool' }
+      ],
+      toCode: (p) => (p.stop === true || p.stop === 'true'
+        ? `FC(${intLit(p.speed)}, ${floatLit(p.cm)});`
+        : `FC(${intLit(p.speed)}, ${floatLit(p.cm)}, ${boolLit(p.stop)});`)
+    },
+    {
+      type: 'BC_SIMPLE',
+      cat: 'enc',
+      title: 'BC',
+      sig: 'BC(speed, cm)',
+      desc: 'ถอยหลังตามระยะทาง (cm)',
+      defaults: { speed: 50, cm: 30, stop: true },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'cm', label: 'cm', type: 'number' },
+        { key: 'stop', label: 'stop', type: 'bool' }
+      ],
+      toCode: (p) => (p.stop === true || p.stop === 'true'
+        ? `BC(${intLit(p.speed)}, ${floatLit(p.cm)});`
+        : `BC(${intLit(p.speed)}, ${floatLit(p.cm)}, ${boolLit(p.stop)});`)
+    },
+    {
+      type: 'FC_DIR',
+      cat: 'enc',
+      title: 'FC',
+      sig: "FC(speed, cm, 'R')",
+      desc: "เดินหน้าแล้วเลี้ยว/หมุน 90° ('L'/'R'=Swing ไม่หยุด, 'l'/'r'=หยุดหมุน Spin)",
+      defaults: { speed: 80, cm: 30, dir: 'R' },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'cm', label: 'cm', type: 'number' },
+        { key: 'dir', label: 'dir', type: 'dirTurn90' }
+      ],
+      toCode: (p) => `FC(${intLit(p.speed)}, ${floatLit(p.cm)}, ${charLit(p.dir)});`
+    },
+    {
+      type: 'BC_DIR',
+      cat: 'enc',
+      title: 'BC',
+      sig: "BC(speed, cm, 'L')",
+      desc: "ถอยหลังแล้วเลี้ยว/หมุน 90° ('L'/'R'=Swing ไม่หยุด, 'l'/'r'=หยุดหมุน Spin)",
+      defaults: { speed: 60, cm: 30, dir: 'L' },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'cm', label: 'cm', type: 'number' },
+        { key: 'dir', label: 'dir', type: 'dirTurn90' }
+      ],
+      toCode: (p) => `BC(${intLit(p.speed)}, ${floatLit(p.cm)}, ${charLit(p.dir)});`
+    },
+    {
+      type: 'FC4',
+      cat: 'enc',
+      title: 'FC4',
+      sig: "FC4(speed, cm, 'R')",
+      desc: "เดินหน้าแล้วเลี้ยว/หมุน 45° ('L'/'R'=Swing ไม่หยุด, 'l'/'r'=หยุดหมุน Spin)",
+      defaults: { speed: 60, cm: 30, dir: 'R' },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'cm', label: 'cm', type: 'number' },
+        { key: 'dir', label: 'dir', type: 'dirTurn45' }
+      ],
+      toCode: (p) => `FC4(${intLit(p.speed)}, ${floatLit(p.cm)}, ${charLit(p.dir)});`
+    },
+    {
+      type: 'BC4',
+      cat: 'enc',
+      title: 'BC4',
+      sig: "BC4(speed, cm, 'L')",
+      desc: "ถอยหลังแล้วเลี้ยว/หมุน 45° ('L'/'R'=Swing ไม่หยุด, 'l'/'r'=หยุดหมุน Spin)",
+      defaults: { speed: 50, cm: 20, dir: 'L' },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'cm', label: 'cm', type: 'number' },
+        { key: 'dir', label: 'dir', type: 'dirTurn45' }
+      ],
+      toCode: (p) => `BC4(${intLit(p.speed)}, ${floatLit(p.cm)}, ${charLit(p.dir)});`
+    },
+    {
+      type: 'SPIN',
+      cat: 'spin',
+      title: 'SpinDegree',
+      sig: 'SpinDegree(deg)',
+      desc: 'หมุนอยู่กับที่ (+ ขวา, - ซ้าย)',
+      defaults: { deg: 90 },
+      fields: [{ key: 'deg', label: 'deg', type: 'number' }],
+      toCode: (p) => `SpinDegree(${floatLit(p.deg)});`
+    },
+    {
+      type: 'TURN_F',
+      cat: 'spin',
+      title: 'TrunDegreeFront',
+      sig: 'TrunDegreeFront(deg)',
+      desc: 'เทิร์นล้อหน้า (+ ขวา, - ซ้าย)',
+      defaults: { deg: 90 },
+      fields: [{ key: 'deg', label: 'deg', type: 'number' }],
+      toCode: (p) => `TrunDegreeFront(${floatLit(p.deg)});`
+    },
+    {
+      type: 'TURN_B',
+      cat: 'spin',
+      title: 'TrunDegreeBack',
+      sig: 'TrunDegreeBack(deg)',
+      desc: 'เทิร์นล้อหลัง (+ ขวา, - ซ้าย)',
+      defaults: { deg: 90 },
+      fields: [{ key: 'deg', label: 'deg', type: 'number' }],
+      toCode: (p) => `TrunDegreeBack(${floatLit(p.deg)});`
+    },
+    {
+      type: 'TTF90',
+      cat: 'curve',
+      title: 'TTF90',
+      sig: 'TTF90(L, R, cm)',
+      desc: 'ตีโค้งหน้า 90° ด้วย Encoder',
+      defaults: { spdL: 80, spdR: 25, cm: 33 },
+      fields: [
+        { key: 'spdL', label: 'L', type: 'number' },
+        { key: 'spdR', label: 'R', type: 'number' },
+        { key: 'cm', label: 'cm', type: 'number' }
+      ],
+      toCode: (p) => `TTF90(${intLit(p.spdL)}, ${intLit(p.spdR)}, ${intLit(p.cm)});`
+    },
+    {
+      type: 'TTF45',
+      cat: 'curve',
+      title: 'TTF45',
+      sig: 'TTF45(L, R, cm)',
+      desc: 'ตีโค้งหน้า 45° ด้วย Encoder',
+      defaults: { spdL: 80, spdR: 25, cm: 17 },
+      fields: [
+        { key: 'spdL', label: 'L', type: 'number' },
+        { key: 'spdR', label: 'R', type: 'number' },
+        { key: 'cm', label: 'cm', type: 'number' }
+      ],
+      toCode: (p) => `TTF45(${intLit(p.spdL)}, ${intLit(p.spdR)}, ${intLit(p.cm)});`
+    },
+    {
+      type: 'TTB90',
+      cat: 'curve',
+      title: 'TTB90',
+      sig: 'TTB90(L, R, cm)',
+      desc: 'ตีโค้งถอยหลัง 90° ด้วย Encoder',
+      defaults: { spdL: 25, spdR: 80, cm: 33 },
+      fields: [
+        { key: 'spdL', label: 'L', type: 'number' },
+        { key: 'spdR', label: 'R', type: 'number' },
+        { key: 'cm', label: 'cm', type: 'number' }
+      ],
+      toCode: (p) => `TTB90(${intLit(p.spdL)}, ${intLit(p.spdR)}, ${intLit(p.cm)});`
+    },
+    {
+      type: 'TTB45',
+      cat: 'curve',
+      title: 'TTB45',
+      sig: 'TTB45(L, R, cm)',
+      desc: 'ตีโค้งถอยหลัง 45° ด้วย Encoder',
+      defaults: { spdL: 25, spdR: 80, cm: 17 },
+      fields: [
+        { key: 'spdL', label: 'L', type: 'number' },
+        { key: 'spdR', label: 'R', type: 'number' },
+        { key: 'cm', label: 'cm', type: 'number' }
+      ],
+      toCode: (p) => `TTB45(${intLit(p.spdL)}, ${intLit(p.spdR)}, ${intLit(p.cm)});`
+    },
+    {
+      type: 'FF_TIME',
+      cat: 'time',
+      title: 'FF',
+      sig: 'FF(speed, ms)',
+      desc: 'เดินหน้าจับเวลา ms (ข้ามสิ่งกีดขวาง)',
+      defaults: { speed: 60, ms: 400 },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'ms', label: 'ms', type: 'number' }
+      ],
+      toCode: (p) => `FF(${intLit(p.speed)}, ${intLit(p.ms)});`
+    },
+    {
+      type: 'BB_TIME',
+      cat: 'time',
+      title: 'BB',
+      sig: 'BB(speed, ms)',
+      desc: 'ถอยหลังจับเวลา ms',
+      defaults: { speed: 50, ms: 400 },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'ms', label: 'ms', type: 'number' }
+      ],
+      toCode: (p) => `BB(${intLit(p.speed)}, ${intLit(p.ms)});`
+    },
+    {
+      type: 'SETF',
+      cat: 'line',
+      title: 'SetF',
+      sig: 'SetF(speed)',
+      desc: 'จัดแนวเส้นหน้า + รีเซ็ต Yaw = 0',
+      defaults: { speed: 25 },
+      fields: [{ key: 'speed', label: 'spd', type: 'number' }],
+      toCode: (p) => `SetF(${intLit(p.speed)});`
+    },
+    {
+      type: 'SETF_BACK',
+      cat: 'line',
+      title: 'SetF',
+      sig: 'SetF(speed, backCm)',
+      desc: 'จัดเส้นหน้าแล้วถอยออกตาม cm',
+      defaults: { speed: 25, cm: 10 },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'cm', label: 'back', type: 'number' }
+      ],
+      toCode: (p) => `SetF(${intLit(p.speed)}, ${floatLit(p.cm)});`
+    },
+    {
+      type: 'SETF_DIR',
+      cat: 'line',
+      title: 'SetF',
+      sig: "SetF(speed, backCm, 'R')",
+      desc: 'จัดเส้นหน้า -> ถอย -> หมุน/เลี้ยว',
+      defaults: { speed: 25, cm: 10, dir: 'R' },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'cm', label: 'back', type: 'number' },
+        { key: 'dir', label: 'dir', type: 'dir' }
+      ],
+      toCode: (p) => `SetF(${intLit(p.speed)}, ${floatLit(p.cm)}, ${charLit(p.dir)});`
+    },
+    {
+      type: 'SETB',
+      cat: 'line',
+      title: 'SetB',
+      sig: 'SetB(speed)',
+      desc: 'ถอยจัดแนวเส้นหลัง + รีเซ็ต Yaw = 0',
+      defaults: { speed: 25 },
+      fields: [{ key: 'speed', label: 'spd', type: 'number' }],
+      toCode: (p) => `SetB(${intLit(p.speed)});`
+    },
+    {
+      type: 'SETB_FWD',
+      cat: 'line',
+      title: 'SetB',
+      sig: 'SetB(speed, fwdCm)',
+      desc: 'จัดเส้นหลังแล้วเดินหน้าออกตาม cm',
+      defaults: { speed: 25, cm: 10 },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'cm', label: 'fwd', type: 'number' }
+      ],
+      toCode: (p) => `SetB(${intLit(p.speed)}, ${floatLit(p.cm)});`
+    },
+    {
+      type: 'SETB_DIR',
+      cat: 'line',
+      title: 'SetB',
+      sig: "SetB(speed, fwdCm, 'L')",
+      desc: 'จัดเส้นหลัง -> เดินออก -> หมุน/เลี้ยว',
+      defaults: { speed: 25, cm: 10, dir: 'L' },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'cm', label: 'fwd', type: 'number' },
+        { key: 'dir', label: 'dir', type: 'dir' }
+      ],
+      toCode: (p) => `SetB(${intLit(p.speed)}, ${floatLit(p.cm)}, ${charLit(p.dir)});`
+    },
+    {
+      type: 'DROPF_SPD',
+      cat: 'line',
+      title: 'DropF',
+      sig: 'DropF(speed)',
+      desc: 'วิ่งเข้าเส้นหน้า (SetFront_drop) -> ปล่อยลูกบาศก์หน้า',
+      defaults: { speed: 30 },
+      fields: [{ key: 'speed', label: 'spd', type: 'number' }],
+      toCode: (p) => `DropF(${intLit(p.speed)});`
+    },
+    {
+      type: 'DROPB_SPD',
+      cat: 'line',
+      title: 'DropB',
+      sig: 'DropB(speed)',
+      desc: 'ถอยเข้าเส้นหลัง (SetBack_drop) -> ปล่อยลูกบาศก์หลัง',
+      defaults: { speed: 30 },
+      fields: [{ key: 'speed', label: 'spd', type: 'number' }],
+      toCode: (p) => `DropB(${intLit(p.speed)});`
+    },
+    {
+      type: 'DROPF',
+      cat: 'line',
+      title: 'DropF',
+      sig: 'DropF()',
+      desc: 'ปล่อยลูกบาศก์ด้านหน้าทันที',
+      defaults: {},
+      fields: [],
+      toCode: () => 'DropF();'
+    },
+    {
+      type: 'DROPB',
+      cat: 'line',
+      title: 'DropB',
+      sig: 'DropB()',
+      desc: 'ปล่อยลูกบาศก์ด้านหลังทันที',
+      defaults: {},
+      fields: [],
+      toCode: () => 'DropB();'
+    },
+    {
+      type: 'SET_VAR',
+      cat: 'vars',
+      title: 'set var',
+      sig: 'var = expr;',
+      desc: 'กำหนดค่า/สูตรให้ตัวแปรใน Variables.ino',
+      defaults: { name: 'spdNorm', value: 60 },
+      fields: [
+        { key: 'name', label: 'var', type: 'var_name' },
+        { key: 'value', label: '=', type: 'number' }
+      ],
+      toCode: (p) => {
+        const vObj = (getVariables() || []).find((v) => v.name === p.name);
+        if (vObj && vObj.type === 'float') return `${p.name} = ${floatLit(p.value)};`;
+        if (vObj && vObj.type === 'char') return `${p.name} = ${charLit(p.value)};`;
+        if (vObj && vObj.type === 'bool') return `${p.name} = ${boolLit(p.value)};`;
+        return `${p.name} = ${intLit(p.value)};`;
+      }
+    },
+    {
+      type: 'IF_INLINE',
+      cat: 'ctrl',
+      title: 'if',
+      sig: 'if (cond) { stmt; }',
+      desc: 'ทำคำสั่งเมื่อเงื่อนไขตรรกศาสตร์เป็นจริง',
+      defaults: { cond: { kind: 'expr', op: 'LOGIC_GT', args: { a: { kind: 'var', name: 'spdNorm' }, b: 40 } }, stmt: 'FC(80, 30.0f);' },
+      fields: [
+        { key: 'cond', label: 'if', type: 'number' },
+        { key: 'stmt', label: 'do', type: 'text' }
+      ],
+      toCode: (p) => `if (${exprToCode(p.cond, 'raw')}) { ${String(p.stmt || '').trim()} }`
+    },
+    {
+      type: 'STOP',
+      cat: 'ctrl',
+      title: 'STOP',
+      sig: 'STOP()',
+      desc: 'หยุดรอผู้ใช้กดปุ่ม A/B แล้วรีเซ็ต Yaw',
+      defaults: {},
+      fields: [],
+      toCode: () => 'STOP();'
+    },
+    {
+      type: 'DELAY',
+      cat: 'ctrl',
+      title: 'delay',
+      sig: 'delay(ms)',
+      desc: 'หน่วงเวลา (มิลลิวินาที)',
+      defaults: { ms: 300 },
+      fields: [{ key: 'ms', label: 'ms', type: 'number' }],
+      toCode: (p) => `delay(${intLit(p.ms)});`
+    },
+    {
+      type: 'RAW',
+      cat: 'ctrl',
+      title: 'C++',
+      sig: 'Raw C++',
+      desc: 'แทรกคำสั่ง C++ อิสระ 1 บรรทัด',
+      defaults: { raw: '// custom command' },
+      fields: [{ key: 'raw', label: 'C++', type: 'text' }],
+      toCode: (p) => String(p.raw || '').trim()
+    }
+  ];
+}
+
+export const CONFIG_SECTIONS = [
+  { id: 'mode', title: 'โหมดการทำงานเริ่มต้น (Boot & Run Mode)' },
+  { id: 'pd', title: 'จูนความตรง Gyro PD (เดินหน้า / ถอยหลัง)' },
+  { id: 'spin', title: 'จูนการหมุนอยู่กับที่และเลี้ยว Pivot (Gyro Spin & Turn)' },
+  { id: 'servo', title: 'เวลาหน่วงเซอร์โว (Servo Timing)' },
+  { id: 'overwrite', title: 'เขียนทับค่า Flash สำรอง (ใช้เมื่อจอเสีย / อ่านค่าผ่านจอไม่ได้)' }
+];
+
+export const CONFIG_FIELDS = [
+  { section: 'mode', key: 'enableMultiMode', label: 'enableMultiMode', hint: 'เปิดให้กดปุ่ม B สลับโหมด RunMode 1-3 บนตัวหุ่น', type: 'bool' },
+  { section: 'mode', key: 'currentRunMode', label: 'currentRunMode', hint: 'โหมดภารกิจเริ่มต้นเมื่อเปิดเครื่อง (1 - 3)', type: 'number', min: 1, max: 3 },
+  { section: 'pd', key: 'fwdKp', label: 'fwdKp', hint: 'สัดส่วนชดเชยความเอียงเดินหน้า (Kp)', type: 'number', step: 0.05 },
+  { section: 'pd', key: 'fwdKd', label: 'fwdKd', hint: 'ตัวหน่วงลดส่ายเดินหน้า (Kd)', type: 'number', step: 0.1 },
+  { section: 'pd', key: 'bwdKp', label: 'bwdKp', hint: 'สัดส่วนชดเชยความเอียงถอยหลัง (Kp)', type: 'number', step: 0.05 },
+  { section: 'pd', key: 'bwdKd', label: 'bwdKd', hint: 'ตัวหน่วงลดส่ายถอยหลัง (Kd)', type: 'number', step: 0.1 },
+  { section: 'spin', key: 'spinKp', label: 'spinKp', hint: 'ความไวหมุนอยู่กับที่ SpinDegree Kp', type: 'number', step: 0.05 },
+  { section: 'spin', key: 'spinKd', label: 'spinKd', hint: 'ตัวหน่วงลดดีดกลับ SpinDegree Kd', type: 'number', step: 0.05 },
+  { section: 'spin', key: 'spinMinSpeed', label: 'spinMinSpeed', hint: 'ความเร็วขั้นต่ำขณะ Spin', type: 'number', min: 10, max: 100 },
+  { section: 'spin', key: 'spinMaxSpeed', label: 'spinMaxSpeed', hint: 'ความเร็วสูงสุดขณะ Spin', type: 'number', min: 15, max: 100 },
+  { section: 'spin', key: 'turnFrontKp', label: 'turnFrontKp', hint: 'Pivot ล้อหน้า TrunDegreeFront Kp', type: 'number', step: 0.05 },
+  { section: 'spin', key: 'turnFrontKd', label: 'turnFrontKd', hint: 'Pivot ล้อหน้า Kd', type: 'number', step: 0.05 },
+  { section: 'spin', key: 'turnFrontMinSpeed', label: 'turnFrontMinSpeed', hint: 'ความเร็วต่ำสุดล้อหน้า', type: 'number', min: 10, max: 100 },
+  { section: 'spin', key: 'turnFrontMaxSpeed', label: 'turnFrontMaxSpeed', hint: 'ความเร็วสูงสุดล้อหน้า', type: 'number', min: 15, max: 100 },
+  { section: 'spin', key: 'turnBackKp', label: 'turnBackKp', hint: 'Pivot ล้อหลัง TrunDegreeBack Kp', type: 'number', step: 0.05 },
+  { section: 'spin', key: 'turnBackKd', label: 'turnBackKd', hint: 'Pivot ล้อหลัง Kd', type: 'number', step: 0.05 },
+  { section: 'spin', key: 'turnBackMinSpeed', label: 'turnBackMinSpeed', hint: 'ความเร็วต่ำสุดล้อหลัง', type: 'number', min: 10, max: 100 },
+  { section: 'spin', key: 'turnBackMaxSpeed', label: 'turnBackMaxSpeed', hint: 'ความเร็วสูงสุดล้อหลัง', type: 'number', min: 15, max: 100 },
+  { section: 'spin', key: 'threshold_spinDegree', label: 'threshold_spinDegree', hint: 'ระยะองศาหยุดเข้าเป้า Spin', type: 'number', step: 0.1 },
+  { section: 'spin', key: 'smallAngle_threshold', label: 'smallAngle_threshold', hint: 'องศาที่เริ่มชะลอความเร็วหมุน', type: 'number', step: 1 },
+  { section: 'spin', key: 'smallAngle_turnDegree', label: 'smallAngle_turnDegree', hint: 'ความละเอียดหยุด Pivot', type: 'number', step: 0.1 },
+  { section: 'servo', key: 'servoDropDelayMs', label: 'servoDropDelayMs', hint: 'เวลาหน่วงรอหลังสั่งปล่อยเซอร์โว (ms)', type: 'number', min: 50, max: 2000 },
+  { section: 'overwrite', isToggle: true, key: 'forceOverwriteFlashFromCode', label: 'forceOverwriteFlashFromCode', hint: 'เปิด true เฉพาะเมื่อต้องการเขียนทับค่าใน Flash จากรายการสำรองด้านล่างนี้', type: 'bool' },
+  { section: 'overwrite', requiresOverwrite: true, key: 'ticksPerCm', label: 'ticksPerCm', hint: 'จำนวน Ticks ต่อ 1 cm (จากการเข็น 30cm)', type: 'number', step: 0.01 },
+  { section: 'overwrite', requiresOverwrite: true, key: 'distTuneMm', label: 'distTuneMm', hint: 'ค่าชดเชยระยะเดิน +/- mm ต่อ 30cm', type: 'number', min: -150, max: 150 },
+  { section: 'overwrite', requiresOverwrite: true, key: 'calRun30cmMs', label: 'calRun30cmMs', hint: 'เวลาวิ่งจริง 30cm ที่ความเร็ว 45 (ms)', type: 'number', min: 150, max: 15000 },
+  { section: 'overwrite', requiresOverwrite: true, key: 'motorTrim', label: 'motorTrim', hint: 'ชดเชยซ้าย/ขวา (- ลดซ้าย / + เพิ่มขวา)', type: 'number', min: -25, max: 25 },
+  { section: 'overwrite', requiresOverwrite: true, key: 'frontLock', label: 'frontLock', hint: 'องศาล็อคเซอร์โวหน้า', type: 'number', min: 0, max: 180 },
+  { section: 'overwrite', requiresOverwrite: true, key: 'frontDrop', label: 'frontDrop', hint: 'องศาปล่อยเซอร์โวหน้า', type: 'number', min: 0, max: 180 },
+  { section: 'overwrite', requiresOverwrite: true, key: 'backLock', label: 'backLock', hint: 'องศาล็อคเซอร์โวหลัง', type: 'number', min: 0, max: 180 },
+  { section: 'overwrite', requiresOverwrite: true, key: 'backDrop', label: 'backDrop', hint: 'องศาปล่อยเซอร์โวหลัง', type: 'number', min: 0, max: 180 },
+  { section: 'overwrite', requiresOverwrite: true, key: 'showCmdOnRun', label: 'showCmdOnRun', hint: 'แสดงคำสั่งและเวลาบนจอ LCD ขณะวิ่ง', type: 'bool' },
+  { section: 'overwrite', requiresOverwrite: true, key: 'beepOnCmd', label: 'beepOnCmd', hint: 'ส่งเสียง Beep เมื่อเริ่มคำสั่ง', type: 'bool' }
+];
+
+export const SNIPPETS = [
+  { code: "FC(80, 30.0f, 'R');", desc: 'เดินหน้า 30 cm แล้ว Swing ขวา 90° (ไม่หยุด)' },
+  { code: "FC(80, 30.0f, 'L');", desc: 'เดินหน้า 30 cm แล้ว Swing ซ้าย 90° (ไม่หยุด)' },
+  { code: "FC(80, 30.0f, 'r');", desc: 'เดินหน้า 30 cm แล้วหยุดหมุน Spin ขวา 90°' },
+  { code: "FC4(60, 30.0f, 'R');", desc: 'เดินหน้า 30 cm แล้ว Swing ขวา 45° (ไม่หยุด)' },
+  { code: "BC4(50, 20.0f, 'r');", desc: 'ถอย 20 cm แล้วหยุดหมุน Spin ขวา 45°' },
+  { code: 'SpinDegree(90.0f);', desc: 'หมุนขวาอยู่กับที่ 90°' },
+  { code: 'TrunDegreeFront(-90.0f);', desc: 'Pivot ล้อหน้าซ้าย 90°' },
+  { code: 'TTF90(80, 25, 33);', desc: 'ตีโค้งหน้า 90° ด้วย Encoder' },
+  { code: 'TTB90(25, 80, 33);', desc: 'ตีโค้งถอยหลัง 90° ด้วย Encoder' },
+  { code: 'FF(60, 400);', desc: 'เดินหน้าจับเวลา 400 ms' },
+  { code: 'SetF(25, 10.0f);', desc: 'จัดแนวเส้นหน้าแล้วถอย 10 cm' },
+  { code: 'DropF(30);', desc: 'เข้าเส้นหน้า (SetFront_drop) -> ปล่อยลูกบาศก์' },
+  { code: 'DropB(30);', desc: 'เข้าเส้นหลัง (SetBack_drop) -> ปล่อยลูกบาศก์' },
+  { code: 'STOP();', desc: 'หยุดรอปุ่ม A/B แล้วรีเซ็ต Yaw' }
+];

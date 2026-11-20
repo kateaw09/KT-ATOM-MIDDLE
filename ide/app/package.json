@@ -1,0 +1,21 @@
+{
+  "name": "kt-middle-ide",
+  "version": "3.0.0",
+  "description": "KT Middle IDE — Vite-Powered Dual-Mode Web IDE (Blocks + Simulator + Syntax C++ IDE + Local Version Control)",
+  "main": "server.js",
+  "scripts": {
+    "setup": "node setup-deps.js",
+    "dev": "vite --host 0.0.0.0 --port 3080",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 3080",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "vite": "^8.3.8"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "KT-BOT Robotics",
+  "license": "MIT"
+}
