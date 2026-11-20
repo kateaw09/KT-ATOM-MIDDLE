@@ -52,27 +52,27 @@ unsigned long ramp_up_time_turn   = 0;
 unsigned long ramp_down_time_turn = 0;
 
 // ค่าควบคุมการหมุนและเลี้ยว (จูนสำหรับหุ่น ~300g, ฐานล้อ 7.5 ซม., กว้างซ้าย-ขวา 11.5 ซม.)
-float threshold_spinDegree  = 3.2f;    // ขอบเขตหยุดหมุน Spin (องศา)
+float threshold_spinDegree  = 3.4f;    // ขอบเขตหยุดหมุน Spin (องศา)
 float spinLeftOffsetDeg     = 0.0f;    // ชดเชยหมุนซ้ายแรงกว่าขวาใน Spin (+ = หมุนซ้ายหยุดเร็วขึ้น)
 float smallAngle_threshold  = 55.0f;   // ช่วงชะลอเข้าความเร็วต่ำก่อนหยุด Spin (องศาสุดท้าย)
-float smallAngle_turnDegree = 5.5f;    // ขอบเขตหยุดเลี้ยว Swing Turn (องศา — ชะลอเข้ามุมแล้วหยุดนุ่มไม่เหวี่ยง)
+float smallAngle_turnDegree = 5.95f;    // ขอบเขตหยุดเลี้ยว Swing Turn (องศา — ชะลอเข้ามุมแล้วหยุดนุ่มไม่เหวี่ยง)
 float turnRightOffsetDeg    = 0.0f;    // ชดเชยความต่างล้อซ้าย/ขวาตอนเลี้ยว Swing (+ = ล้อซ้ายขับ/เลี้ยวขวาหยุดเร็วขึ้น)
 
 float spinKp      = 1.3f;      // หมุนอยู่กับที่ (spinDegree): Kp
-float spinKd      = 1.46f;     // หมุนอยู่กับที่ (spinDegree): Kd (หน่วงแรงเฉื่อยจากอัตราการหมุน IMU deg/100ms)
+float spinKd      = 1.52f;     // หมุนอยู่กับที่ (spinDegree): Kd (หน่วงแรงเฉื่อยจากอัตราการหมุน IMU deg/100ms)
 int   spinMinSpeed = 20;       // หมุนอยู่กับที่: ความเร็วต่ำสุด
 int   spinMaxSpeed = 80;       // หมุนอยู่กับที่: ความเร็วสูงสุด
-unsigned long spinPostDelayMs = 30; // ดีเลย์รอนิ่งหลังหมุน Spin ก่อนทำคำสั่งถัดไป (แนะนำ 20-80 ms)
+unsigned long spinPostDelayMs = 35; // ดีเลย์รอนิ่งหลังหมุน Spin ก่อนทำคำสั่งถัดไป (20-80 ms)
 
-float turnFrontKp = 1.45f;     // เลี้ยวไปข้างหน้า (turnDegreeFront): Kp
-float turnFrontKd = 1.30f;     // เลี้ยวไปข้างหน้า (turnDegreeFront): Kd (หน่วงช่วงเข้ามุมลดอาการเหวี่ยง)
+float turnFrontKp = 1.25f;     // เลี้ยวไปข้างหน้า (turnDegreeFront): Kp
+float turnFrontKd = 1.3f;     // เลี้ยวไปข้างหน้า (turnDegreeFront): Kd (หน่วงช่วงเข้ามุมลดอาการเหวี่ยง)
 int   turnFrontMinSpeed = 26;  // เลี้ยวไปข้างหน้า: ความเร็วช่วงชะลอเข้ามุม (กันเหวี่ยง/ไม่สะดุด)
-int   turnFrontMaxSpeed = 90;  // เลี้ยวไปข้างหน้า: ความเร็วสูงสุดช่วงเลี้ยว (70-100)
+int   turnFrontMaxSpeed = 100;  // เลี้ยวไปข้างหน้า: ความเร็วสูงสุดช่วงเลี้ยว (70-100)
 
-float turnBackKp  = 1.45f;     // เลี้ยวไปข้างหลัง (turnDegreeBack): Kp
-float turnBackKd  = 1.30f;     // เลี้ยวไปข้างหลัง (turnDegreeBack): Kd (หน่วงช่วงเข้ามุมลดอาการเหวี่ยง)
+float turnBackKp  = 1.25f;     // เลี้ยวไปข้างหลัง (turnDegreeBack): Kp
+float turnBackKd  = 1.3f;     // เลี้ยวไปข้างหลัง (turnDegreeBack): Kd (หน่วงช่วงเข้ามุมลดอาการเหวี่ยง)
 int   turnBackMinSpeed  = 26;  // เลี้ยวไปข้างหลัง: ความเร็วช่วงชะลอเข้ามุม (กันเหวี่ยง/ไม่สะดุด)
-int   turnBackMaxSpeed  = 90;  // เลี้ยวไปข้างหลัง: ความเร็วสูงสุดช่วงเลี้ยว (70-100)
+int   turnBackMaxSpeed  = 100;  // เลี้ยวไปข้างหลัง: ความเร็วสูงสุดช่วงเลี้ยว (70-100)
 float turnInnerRatio    = 0.0f;  // 0.0 = ล้อฝั่งในหยุดหมุน (วงเลี้ยวแคบแบบเดิม), >0 = ล้อในหมุนตามสัดส่วน
 
 unsigned long delayALL = 0;    // หน่วงเวลาหลังคำสั่งเดินด้วยเวลา (ms)
@@ -229,8 +229,8 @@ void configLoad() {
     beepOnCmd    = cfgPrefs.getBool("beepcmd", beepOnCmd);
 
     int tuneVer = cfgPrefs.getInt("tver", 0);
-    threshold_spinDegree  = constrain(cfgPrefs.getFloat("tspin", threshold_spinDegree), 1.5f, 6.0f);
-    spinLeftOffsetDeg     = constrain(cfgPrefs.getFloat("slofs", spinLeftOffsetDeg), -3.5f, 3.5f);
+    threshold_spinDegree  = constrain(cfgPrefs.getFloat("tspin", threshold_spinDegree), 1.0f, 14.0f);
+    spinLeftOffsetDeg     = constrain(cfgPrefs.getFloat("slofs", spinLeftOffsetDeg), -5.0f, 5.0f);
     smallAngle_threshold  = constrain(cfgPrefs.getFloat("sathr", smallAngle_threshold), 35.0f, 80.0f);
     spinKp      = constrain(cfgPrefs.getFloat("spinkp", spinKp), 0.55f, 1.80f);
     spinKd      = constrain(cfgPrefs.getFloat("spinkd", spinKd), 0.25f, 2.00f);

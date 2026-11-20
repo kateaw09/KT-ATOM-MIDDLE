@@ -16,30 +16,30 @@ static float wrapDeg180(float deg) {
     return deg;
 }
 
-static void updateImuAngularRate(float yaw, unsigned long now,
-                                 float &lastImuYaw, unsigned long &lastImuMs,
-                                 float &angularRate) {
-    float dyaw = wrapDeg180(yaw - lastImuYaw);
-    unsigned long dt = now - lastImuMs;
-    if (fabsf(dyaw) > 0.05f && dt >= 4UL) {
-        float instRate = constrain(-dyaw * (100.0f / (float)dt), -120.0f, 120.0f); // deg per 100ms
-        angularRate = 0.65f * instRate + 0.35f * angularRate;
-        lastImuYaw = yaw;
-        lastImuMs  = now;
-    } else if (dt > 45UL) {
-        angularRate *= 0.35f;
-        if (fabsf(angularRate) < 1.5f) angularRate = 0.0f;
-        lastImuMs = now;
-    }
+static void spinApplyBrake(float rateMag, float fusedRate100ms, bool spinRight, bool &braked) {
+    if (braked || rateMag <= 7.0f) return;
+    // กำลังหมุนขวา (CW) -> ยิงเบรกสวนไปซ้าย (-, +), หมุนซ้าย (CCW) -> ยิงสวนไปขวา (+, -)
+    bool movingRight = (fabsf(fusedRate100ms) > 2.0f) ? (fusedRate100ms > 0.0f) : spinRight;
+    int brakeSpd = constrain((int)roundf(rateMag * 0.60f), 14, 40);
+    int brakeMs  = constrain((int)roundf(rateMag * 0.35f), 5, 10);
+    int brakeDir = movingRight ? -1 : 1;
+    safeMotorWrite2(brakeDir * brakeSpd, -brakeDir * brakeSpd);
+    delay(brakeMs);
+    braked = true;
 }
 
-static void spinApplyBrake(float rateMag, float angularRate, bool &braked) {
-    if (braked || rateMag <= 8.0f) return;
-    int brakeSpd = constrain((int)roundf(rateMag * 0.55f), 14, 38);
-    int brakeDir = (angularRate < 0.0f) ? -1 : 1;
-    safeMotorWrite2(brakeDir * brakeSpd, -brakeDir * brakeSpd);
-    delay(8);
-    braked = true;
+static bool spinWaitSettleMs(unsigned long waitMs) {
+    unsigned long w0 = millis();
+    while (millis() - w0 < waitMs) {
+        serviceNonBlockingBeep();
+        if (s_tuneActive && (readSwitch(A) || readSwitch(B))) {
+            driveStop();
+            s_tuneFault = 1;
+            return false;
+        }
+        delay(2);
+    }
+    return true;
 }
 
 static void spinDegreeCore(float relativeDeg, float threshold, int maxSpeedOverride,
@@ -51,18 +51,21 @@ static void spinDegreeCore(float relativeDeg, float threshold, int maxSpeedOverr
     const int maxSpd = (maxSpeedOverride > 0)
                            ? max(minSpd, constrain(abs(maxSpeedOverride), 15, 100))
                            : spinMaxSpeed;
-    const unsigned long postWaitMs = constrain(spinPostDelayMs, 15UL, 80UL);
+    const unsigned long postWaitMs = constrain(spinPostDelayMs, 20UL, 80UL);
     const unsigned long timeoutMs  = s_tuneActive ? 2200UL : 3000UL;
     const bool spinRight = (relativeDeg >= 0.0f);
+    const float spinSpan = (fabsf(relativeDeg) >= 5.0f) ? fabsf(relativeDeg) : 90.0f;
+    const float angleScale = constrain(spinSpan / 90.0f, 0.55f, 1.0f);
     const float dirSpinThr = threshold + (spinRight ? -spinLeftOffsetDeg : spinLeftOffsetDeg);
-    const float effThreshold = constrain(dirSpinThr, 1.5f, 7.0f);
+    const float effThreshold = min(constrain(dirSpinThr, 1.0f, 16.0f) * angleScale, spinSpan * 0.45f);
 
-    float startYaw = safeReadYaw();
-    float lastImuYaw = startYaw;
-    unsigned long lastImuMs = millis();
-    float angularRate = 0.0f;
+    fusedHeadingSyncToImu();
+    float startYaw = 0.0f, initRate = 0.0f;
+    fusedHeadingUpdate(startYaw, initRate);
+    float smoothRate = 0.0f;
     float maxTravelDeg = 0.0f;
     unsigned long startMs = millis();
+    unsigned long lowRateSinceMs = 0;
     bool didMove = false;
     bool braked  = false;
     bool didPostCorrect = false;
@@ -80,9 +83,16 @@ static void spinDegreeCore(float relativeDeg, float threshold, int maxSpeedOverr
             return;
         }
 
-        float yaw = safeReadYaw();
+        float yaw = 0.0f, fusedRate100ms = 0.0f;
+        fusedHeadingUpdate(yaw, fusedRate100ms);
         unsigned long now = millis();
-        updateImuAngularRate(yaw, now, lastImuYaw, lastImuMs, angularRate);
+
+        if (didMove && fabsf(fusedRate100ms) < 2.0f) {
+            if (lowRateSinceMs == 0) lowRateSinceMs = now;
+        } else {
+            lowRateSinceMs = 0;
+        }
+        bool stalled = (lowRateSinceMs != 0 && (now - lowRateSinceMs) >= 40UL);
 
         float travelFromStart = fabsf(wrapDeg180(yaw - startYaw));
         if (travelFromStart > maxTravelDeg) maxTravelDeg = travelFromStart;
@@ -93,10 +103,18 @@ static void spinDegreeCore(float relativeDeg, float threshold, int maxSpeedOverr
             else if (!spinRight && error > 0.0f) error -= 360.0f;
         }
 
-        float approachingRate = (error > 0.0f) ? (-angularRate) : angularRate;
-        float stopLeadDeg = (stopAtEnd && !didPostCorrect && approachingRate > 5.0f)
-                                ? constrain(approachingRate * 0.14f, 0.0f, 7.5f)
+        float approachingRate = (error > 0.0f) ? fusedRate100ms : (-fusedRate100ms);
+        if (approachingRate > 0.0f) {
+            smoothRate = (smoothRate <= 0.1f)
+                             ? approachingRate
+                             : (0.65f * approachingRate + 0.35f * smoothRate);
+        } else {
+            smoothRate *= 0.4f;
+        }
+        float stopLeadDeg = (stopAtEnd && !didPostCorrect && smoothRate > 4.0f)
+                                ? constrain(smoothRate * 0.17f, 0.0f, 8.5f)
                                 : 0.0f;
+        float stopBandDeg = didPostCorrect ? 1.6f : (effThreshold + stopLeadDeg);
 
         if (s_tuneActive) {
             if ((now - startMs) > 800UL && maxTravelDeg < 3.0f) {
@@ -112,68 +130,94 @@ static void spinDegreeCore(float relativeDeg, float threshold, int maxSpeedOverr
             }
         }
 
-        if (fabsf(error) <= (effThreshold + stopLeadDeg)) {
+        if (fabsf(error) <= stopBandDeg) {
             if (!stopAtEnd) {
                 reachedTarget = true;
                 break;
             }
-            spinApplyBrake(approachingRate, angularRate, braked);
+            if (!didPostCorrect) {
+                spinApplyBrake(smoothRate, fusedRate100ms, spinRight, braked);
+            }
             driveStop();
             lastSentSpd = 999;
 
-            unsigned long w0 = millis();
-            while (millis() - w0 < postWaitMs) {
-                serviceNonBlockingBeep();
-                if (s_tuneActive && (readSwitch(A) || readSwitch(B))) {
-                    driveStop();
-                    s_tuneFault = 1;
-                    return;
-                }
-                delay(2);
+            if (s_tuneActive) {
+                reachedTarget = true;
+                break;
             }
 
+            unsigned long waitTarget = didPostCorrect ? 20UL : postWaitMs;
+            if (!spinWaitSettleMs(waitTarget)) return;
+
             float postErr = wrapDeg180(current_degree - safeReadYaw());
-            if (didPostCorrect || fabsf(postErr) <= max(2.0f, effThreshold + 0.5f)) {
+            if (didPostCorrect || fabsf(postErr) <= 2.6f) {
                 reachedTarget = true;
                 break;
             }
             didPostCorrect = true;
+            braked         = true;
             signCrossCount = max(signCrossCount, 1);
             lastErrSign    = (postErr > 0.0f) ? 1 : -1;
+            fusedHeadingSyncToImu();
             continue;
         }
 
         int errSign = (error > 0.0f) ? 1 : -1;
         if (didMove && lastErrSign != 0 && errSign != lastErrSign) {
             signCrossCount++;
-            if (stopAtEnd) {
-                spinApplyBrake(-approachingRate, angularRate, braked);
+            if (stopAtEnd && !didPostCorrect) {
+                spinApplyBrake(fabsf(fusedRate100ms), fusedRate100ms, spinRight, braked);
             }
             driveStop();
             lastSentSpd = 999;
-            if ((signCrossCount == 1 && fabsf(error) <= effThreshold + 1.2f) ||
-                signCrossCount >= 2) {
+            if (s_tuneActive || !stopAtEnd) {
                 reachedTarget = true;
                 break;
             }
-            delay(8);
+            if (didPostCorrect || signCrossCount >= 2) {
+                if (!spinWaitSettleMs(20UL)) return;
+                reachedTarget = true;
+                break;
+            }
+            if (!spinWaitSettleMs(postWaitMs)) return;
+            float postErr = wrapDeg180(current_degree - safeReadYaw());
+            if (fabsf(postErr) <= 2.6f) {
+                reachedTarget = true;
+                break;
+            }
+            didPostCorrect = true;
+            braked         = true;
+            lastErrSign    = (postErr > 0.0f) ? 1 : -1;
+            fusedHeadingSyncToImu();
+            continue;
         }
         lastErrSign = errSign;
 
         unsigned long elapsed = now - startMs;
-        int corrSpd      = max(14, minSpd - 4);
-        int floorSpd     = (signCrossCount > 0) ? corrSpd : minSpd;
-        int activeMaxSpd = (signCrossCount > 0) ? corrSpd : maxSpd;
-        int rampMaxSpd = (elapsed < 40UL && activeMaxSpd > floorSpd)
-                             ? (floorSpd + (int)(((float)elapsed / 40.0f) * (activeMaxSpd - floorSpd)))
-                             : activeMaxSpd;
-        if (signCrossCount == 0 && fabsf(error) < smallAngle_threshold && rampMaxSpd > floorSpd) {
-            int distCap = floorSpd + (int)((fabsf(error) / smallAngle_threshold) * (activeMaxSpd - floorSpd));
+        int corrSpd      = stalled ? minSpd : max(18, minSpd - 2);
+        int landFloor    = max(16, minSpd - 4);
+        int dynMinSpd    = minSpd;
+        if (signCrossCount == 0 && !didPostCorrect && !stalled && fabsf(error) < 12.0f && minSpd > landFloor) {
+            dynMinSpd = landFloor + (int)((fabsf(error) / 12.0f) * (minSpd - landFloor));
+        }
+        int floorSpd     = (signCrossCount > 0 || didPostCorrect) ? corrSpd : dynMinSpd;
+        int activeMaxSpd = (signCrossCount > 0 || didPostCorrect) ? corrSpd : maxSpd;
+        int launchFloor  = (signCrossCount > 0 || didPostCorrect) ? floorSpd : min(activeMaxSpd, max(floorSpd, 46));
+        int rampMaxSpd   = (elapsed < 28UL && activeMaxSpd > launchFloor)
+                               ? (launchFloor + (int)(((float)elapsed / 28.0f) * (activeMaxSpd - launchFloor)))
+                               : activeMaxSpd;
+        const float spinDecelDeg = max(12.0f, min(smallAngle_threshold, fabsf(relativeDeg) * 0.65f));
+        if (signCrossCount == 0 && !didPostCorrect && fabsf(error) < spinDecelDeg && rampMaxSpd > floorSpd) {
+            int distCap = floorSpd + (int)((fabsf(error) / spinDecelDeg) * (activeMaxSpd - floorSpd));
             if (distCap < rampMaxSpd) rampMaxSpd = distCap;
         }
 
         float pTerm = fabsf(error) * spinKp;
-        float dBrake = (approachingRate > 0.0f) ? (approachingRate * spinKd * 0.60f) : 0.0f;
+        float dBrake = 0.0f;
+        if (signCrossCount == 0 && !didPostCorrect && fabsf(error) < spinDecelDeg && smoothRate > 0.0f) {
+            float decelBlend = constrain(1.20f - (fabsf(error) / spinDecelDeg), 0.15f, 1.0f);
+            dBrake = smoothRate * spinKd * 0.65f * decelBlend;
+        }
         int mag = constrain((int)roundf(pTerm - dBrake), floorSpd, rampMaxSpd);
         int pdValue = (error > 0.0f) ? mag : -mag;
 
@@ -586,6 +630,7 @@ static void measureSettleWindow(float targetDeg, bool turnRight, float &peakOver
 
 static void measureSpinTrial(float relDeg, int testMaxSpd, float &peakOver, float &settledErr,
                              float &startYawOut, float &endYawOut) {
+    fusedHeadingSyncToImu();
     float startYaw = safeReadYaw();
     startYawOut = startYaw;
     endYawOut   = startYaw;
@@ -611,22 +656,6 @@ static void measureSwingTrial(float relDeg, int testMaxSpd, bool isBack, float &
         return;
     }
     measureSettleWindow(wrapDeg180(startYaw + relDeg), relDeg >= 0.0f, peakOver, settledErr, endYawOut);
-}
-
-static void adjustSpinGains(float peakOver, float settledErr) {
-    if (peakOver > 4.0f) {
-        spinKd = constrain(spinKd + 0.12f, 0.30f, 2.00f);
-        spinKp = constrain(spinKp - 0.06f, 0.55f, 1.80f);
-        smallAngle_threshold = constrain(smallAngle_threshold + 3.0f, 40.0f, 75.0f);
-    } else if (settledErr > 1.8f) {
-        spinKd = constrain(spinKd + 0.06f, 0.30f, 2.00f);
-        // เลยเป้า -> เพิ่มขอบเขตหยุดให้เบรกเร็วขึ้น
-        threshold_spinDegree = constrain(threshold_spinDegree + 0.20f, 1.5f, 5.0f);
-    } else if (settledErr < -2.2f) {
-        spinKp = constrain(spinKp + 0.08f, 0.55f, 1.80f);
-        // ขาดเป้า -> ลดขอบเขตหยุดให้หมุนเข้าไปต่ออีกนิด
-        threshold_spinDegree = constrain(threshold_spinDegree - 0.20f, 1.5f, 5.0f);
-    }
 }
 
 static void adjustSwingGains(float &kp, float &kd, float peakOver, float settledErr, bool updateThr) {
@@ -738,23 +767,112 @@ static bool verifySwingFrontPair(const char* logTag, const char* uiTag, int pct,
     return true;
 }
 
-static void adjustSpinPairAsymmetry(float errR, float errL) {
-    float asymL = (errL - errR) * 0.5f; // + = Left overshot more than Right
-    if (fabsf(asymL) > 0.5f) {
-        float step = constrain(asymL * 0.45f, -1.2f, 1.2f);
-        spinLeftOffsetDeg = constrain(spinLeftOffsetDeg + step, -3.5f, 3.5f);
+static bool tuneSpinSideThreshold(float relDeg, int speed, float initThr,
+                                  const char* logTag, const char* uiTag, int pctStart, int pctSpan,
+                                  float &outBestThr, float &outBestErr, float &outBestPeak,
+                                  void (*onProgress)(const char* stage, int pct, float lastErr)) {
+    spinLeftOffsetDeg = 0.0f;
+    const int MAX_ITERS = 6;
+    float curThr   = constrain(initThr, 1.0f, 14.0f);
+    float bestThr  = curThr;
+    float bestErr  = 999.0f;
+    float bestPeak = 999.0f;
+    bool hasLow = false, hasHigh = false;
+    float lowThr = 1.0f, lowErr = 0.0f;
+    float highThr = 14.0f, highErr = 0.0f;
+
+    for (int iter = 0; iter < MAX_ITERS; iter++) {
+        if (tuneCheckAbort()) return false;
+        threshold_spinDegree = curThr;
+        float peakOver = 0.0f, settledErr = 0.0f, yaw0 = 0.0f, yaw1 = 0.0f;
+        measureSpinTrial(relDeg, speed, peakOver, settledErr, yaw0, yaw1);
+
+        if (s_tuneFault == 0) {
+            if (fabsf(settledErr) < fabsf(bestErr)) {
+                bestErr  = settledErr;
+                bestThr  = curThr;
+                bestPeak = peakOver;
+            }
+            if (settledErr > 0.0f) {
+                lowThr = curThr;
+                lowErr = settledErr;
+                hasLow = true;
+                if (hasHigh && lowThr >= highThr - 0.1f) hasHigh = false;
+            } else {
+                highThr = curThr;
+                highErr = settledErr;
+                hasHigh = true;
+                if (hasLow && highThr <= lowThr + 0.1f) hasLow = false;
+            }
+        }
+
+        Serial.printf("[TUNE] %s#%d spd=%d ang=%+.0f yaw=%.1f->%.1f peak=%+.1f err=%+.1f thr=%.2f best=%.2f(%+.1f) fault=%d\n",
+                      logTag, iter + 1, speed, relDeg, yaw0, yaw1, peakOver, settledErr,
+                      curThr, bestThr, bestErr, (int)s_tuneFault);
+        if (s_tuneFault != 0) return false;
+
+        if (onProgress) {
+            onProgress(uiTag, pctStart + ((iter + 1) * pctSpan) / MAX_ITERS, settledErr);
+        }
+        if (!tunePauseMs(220)) return false;
+        if (fabsf(settledErr) <= 0.6f) break;
+
+        float nextThr = curThr;
+        if (hasLow && hasHigh && (highThr - lowThr) > 0.25f) {
+            float frac = constrain(lowErr / (lowErr - highErr), 0.25f, 0.75f);
+            nextThr = lowThr + (highThr - lowThr) * frac;
+        } else {
+            float step = constrain(settledErr * 0.70f, -3.5f, 3.5f);
+            if (fabsf(step) < 0.25f) step = (settledErr >= 0.0f) ? 0.25f : -0.25f;
+            nextThr = curThr + step;
+        }
+        nextThr = constrain(nextThr, 1.0f, 14.0f);
+        if (fabsf(nextThr - curThr) < 0.05f) break;
+        curThr = nextThr;
     }
+
+    outBestThr  = bestThr;
+    outBestErr  = bestErr;
+    outBestPeak = bestPeak;
+    return true;
+}
+
+static bool verifySpinPair(const char* logTag, const char* uiTag, int pct, int speed,
+                           float &outErrR, float &outErrL, float &outWorstPeak,
+                           void (*onProgress)(const char* stage, int pct, float lastErr)) {
+    const float dirs2[2] = { 1.0f, -1.0f };
+    float errs[2] = { 0.0f, 0.0f };
+    float worstPeak = -999.0f;
+    for (int i = 0; i < 2; i++) {
+        if (tuneCheckAbort()) return false;
+        float ang = dirs2[i] * 90.0f;
+        float peakOver = 0.0f, settledErr = 0.0f, yaw0 = 0.0f, yaw1 = 0.0f;
+        measureSpinTrial(ang, speed, peakOver, settledErr, yaw0, yaw1);
+        Serial.printf("[TUNE] %s ang=%+.0f spd=%d yaw=%.1f->%.1f peak=%+.1f err=%+.1f thr=%.2f slofs=%+.2f fault=%d\n",
+                      logTag, ang, speed, yaw0, yaw1, peakOver, settledErr,
+                      threshold_spinDegree, spinLeftOffsetDeg, (int)s_tuneFault);
+        if (s_tuneFault != 0) return false;
+        errs[i] = settledErr;
+        if (peakOver > worstPeak) worstPeak = peakOver;
+        if (!tunePauseMs(220)) return false;
+    }
+    outErrR = errs[0];
+    outErrL = errs[1];
+    outWorstPeak = worstPeak;
+    float worstErr = (fabsf(errs[0]) > fabsf(errs[1])) ? errs[0] : errs[1];
+    if (onProgress) onProgress(uiTag, pct, worstErr);
+    return true;
 }
 
 static void autoTuneRunStages(float &outSpinErr, float &outTurnErr,
                               void (*onProgress)(const char* stage, int pct, float lastErr)) {
-    threshold_spinDegree  = 3.0f;
+    threshold_spinDegree  = 3.4f;
     spinLeftOffsetDeg     = 0.0f;
     smallAngle_turnDegree = 5.5f;
     turnRightOffsetDeg    = 0.0f;
     smallAngle_threshold  = 55.0f;
-    spinKp      = constrain(spinKp, 0.70f, 1.30f);
-    spinKd      = constrain(spinKd, 0.45f, 1.40f);
+    spinKp      = constrain(spinKp, 0.80f, 1.40f);
+    spinKd      = constrain(spinKd, 0.80f, 1.80f);
     turnFrontKp = constrain(turnFrontKp, 0.90f, 2.00f);
     turnFrontKd = constrain(turnFrontKd, 0.80f, 1.80f);
     turnBackKp  = turnFrontKp;
@@ -763,123 +881,104 @@ static void autoTuneRunStages(float &outSpinErr, float &outTurnErr,
     setAngleOffset();
     current_degree = 0.0f;
     if (!tunePauseMs(150)) return;
-    if (onProgress) onProgress("SPIN LOW (35)", 5, 0.0f);
+    if (onProgress) onProgress("SPIN PROBE", 5, 0.0f);
 
-    // --- Stage 1: SPIN LOW (35) ---
-    const float dirs2[2] = { 1.0f, -1.0f };
-    for (int i = 0; i < 2; i++) {
-        if (tuneCheckAbort()) return;
-        float peakOver = 0.0f, settledErr = 0.0f, yaw0 = 0.0f, yaw1 = 0.0f;
-        measureSpinTrial(dirs2[i] * 90.0f, 35, peakOver, settledErr, yaw0, yaw1);
-        Serial.printf("[TUNE] SPIN LOW(35) dir=%+.0f yaw=%.1f->%.1f peak=%+.1f err=%+.1f Kp=%.2f Kd=%.2f fault=%d\n",
-                      dirs2[i] * 90.0f, yaw0, yaw1, peakOver, settledErr, spinKp, spinKd, (int)s_tuneFault);
-        if (s_tuneFault != 0) return;
-        adjustSpinGains(peakOver, settledErr);
-        outSpinErr = settledErr;
-        if (onProgress) onProgress("SPIN LOW (35)", 10 + i * 8, settledErr);
-        if (!tunePauseMs(260)) return;
-    }
-
-    // --- Stage 2: SPIN MID (50) + Consecutive ---
-    float spinMidErr[2] = { 0.0f, 0.0f };
-    for (int i = 0; i < 2; i++) {
-        if (tuneCheckAbort()) return;
-        float peakOver = 0.0f, settledErr = 0.0f, yaw0 = 0.0f, yaw1 = 0.0f;
-        measureSpinTrial(dirs2[i] * 90.0f, 50, peakOver, settledErr, yaw0, yaw1);
-        Serial.printf("[TUNE] SPIN MID(50) dir=%+.0f yaw=%.1f->%.1f peak=%+.1f err=%+.1f Kp=%.2f Kd=%.2f fault=%d\n",
-                      dirs2[i] * 90.0f, yaw0, yaw1, peakOver, settledErr, spinKp, spinKd, (int)s_tuneFault);
-        if (s_tuneFault != 0) return;
-        spinMidErr[i] = settledErr;
-        adjustSpinGains(peakOver, settledErr);
-        outSpinErr = settledErr;
-        if (onProgress) onProgress("SPIN MID (50)", 24 + i * 6, settledErr);
-        if (!tunePauseMs(260)) return;
-    }
-    adjustSpinPairAsymmetry(spinMidErr[0], spinMidErr[1]);
-    for (int p = 0; p < 2; p++) {
-        if (tuneCheckAbort()) return;
-        float dir = dirs2[p];
-        float startYaw = safeReadYaw();
-        current_degree = startYaw;
-        spinDegreeCore(dir * 90.0f, threshold_spinDegree, 50, true, false);
-        if (s_tuneFault != 0) return;
-        if (!tunePauseMs(100)) return;
-        spinDegreeCore(dir * 90.0f, threshold_spinDegree, 50, true, false);
-        if (s_tuneFault != 0) return;
-        float peakOver = 0.0f, cumErr = 0.0f, endYaw = 0.0f;
-        measureSettleWindow(wrapDeg180(startYaw + dir * 180.0f), dir >= 0.0f, peakOver, cumErr, endYaw);
-        Serial.printf("[TUNE] SPIN SEQ(50) dir=%+.0f yaw=%.1f->%.1f cumErr=%+.1f Kp=%.2f Kd=%.2f fault=%d\n",
-                      dir * 180.0f, startYaw, endYaw, cumErr, spinKp, spinKd, (int)s_tuneFault);
-        if (s_tuneFault != 0) return;
-        adjustSpinGains(peakOver, cumErr * 0.5f);
-        outSpinErr = cumErr * 0.5f;
-        if (onProgress) onProgress("SPIN SEQ (50)", 36 + p * 5, outSpinErr);
-        if (!tunePauseMs(260)) return;
-    }
-
-    // --- Stage 3: SPIN HIGH (65 -> 80 or fallback 55 -> 50) ---
+    // --- Stage 1: SPIN SAFE PROBE (50 -> 65 -> 75 -> 80) ---
     int bestSpinMax = 50;
-    bool spin65Ok = true;
-    float spinHi65Err[2] = { 0.0f, 0.0f };
-    for (int i = 0; i < 2; i++) {
-        if (tuneCheckAbort()) return;
-        float peakOver = 0.0f, settledErr = 0.0f, yaw0 = 0.0f, yaw1 = 0.0f;
-        measureSpinTrial(dirs2[i] * 90.0f, 65, peakOver, settledErr, yaw0, yaw1);
-        Serial.printf("[TUNE] SPIN HI(65) dir=%+.0f yaw=%.1f->%.1f peak=%+.1f err=%+.1f fault=%d\n",
-                      dirs2[i] * 90.0f, yaw0, yaw1, peakOver, settledErr, (int)s_tuneFault);
-        if (s_tuneFault != 0) return;
-        spinHi65Err[i] = settledErr;
-        outSpinErr = settledErr;
-        if (peakOver > 8.5f || fabsf(settledErr) > 4.0f) {
-            spinKd = constrain(spinKd + 0.14f, 0.30f, 2.00f);
-            spinKp = constrain(spinKp - 0.06f, 0.55f, 1.80f);
-            spin65Ok = false;
-        } else {
-            adjustSpinGains(peakOver, settledErr);
-        }
-        if (onProgress) onProgress("SPIN HI (65)", 46 + i * 4, settledErr);
-        if (!tunePauseMs(260)) return;
-    }
-    adjustSpinPairAsymmetry(spinHi65Err[0], spinHi65Err[1]);
-    if (spin65Ok) {
-        bestSpinMax = 65;
-        bool spin80Ok = true;
-        float spinHi80Err[2] = { 0.0f, 0.0f };
-        for (int i = 0; i < 2; i++) {
+    float probeThr  = 3.4f;
+    {
+        const int probeSpeeds[4] = { 50, 65, 75, 80 };
+        for (int idx = 0; idx < 4; idx++) {
             if (tuneCheckAbort()) return;
+            int sp = probeSpeeds[idx];
+            threshold_spinDegree = probeThr;
             float peakOver = 0.0f, settledErr = 0.0f, yaw0 = 0.0f, yaw1 = 0.0f;
-            measureSpinTrial(dirs2[i] * 90.0f, 80, peakOver, settledErr, yaw0, yaw1);
-            Serial.printf("[TUNE] SPIN MAX(80) dir=%+.0f yaw=%.1f->%.1f peak=%+.1f err=%+.1f slofs=%+.2f fault=%d\n",
-                          dirs2[i] * 90.0f, yaw0, yaw1, peakOver, settledErr, spinLeftOffsetDeg, (int)s_tuneFault);
+            measureSpinTrial(90.0f, sp, peakOver, settledErr, yaw0, yaw1);
+            Serial.printf("[TUNE] SPIN PROBE(%d) yaw=%.1f->%.1f peak=%+.1f err=%+.1f thr=%.2f Kp=%.2f Kd=%.2f fault=%d\n",
+                          sp, yaw0, yaw1, peakOver, settledErr, probeThr, spinKp, spinKd, (int)s_tuneFault);
             if (s_tuneFault != 0) return;
-            spinHi80Err[i] = settledErr;
-            outSpinErr = settledErr;
-            if (peakOver > 8.5f || fabsf(settledErr) > 4.0f) {
-                spin80Ok = false;
-            } else {
-                adjustSpinGains(peakOver, settledErr);
+
+            float rebound = peakOver - settledErr;
+            if (sp > 50 && (peakOver > 9.0f || rebound > 3.5f)) {
+                spinKd = constrain(spinKd + 0.08f, 0.60f, 2.00f);
+                smallAngle_threshold = constrain(smallAngle_threshold + 3.0f, 45.0f, 75.0f);
+                outSpinErr = settledErr;
+                if (onProgress) onProgress("SPIN PROBE", 6 + idx * 3, settledErr);
+                if (!tunePauseMs(220)) return;
+                break;
             }
-            if (onProgress) onProgress("SPIN MAX (80)", 53 + i * 3, settledErr);
-            if (!tunePauseMs(260)) return;
+            bestSpinMax = sp;
+            if (peakOver > 4.0f) {
+                spinKd = constrain(spinKd + 0.08f, 0.60f, 2.00f);
+                spinKp = constrain(spinKp - 0.04f, 0.75f, 1.50f);
+                smallAngle_threshold = constrain(smallAngle_threshold + 2.0f, 45.0f, 75.0f);
+            }
+            probeThr = constrain(probeThr + constrain(settledErr * 0.65f, -3.5f, 3.5f), 1.2f, 14.0f);
+            outSpinErr = settledErr;
+            if (onProgress) onProgress("SPIN PROBE", 6 + idx * 3, settledErr);
+            if (!tunePauseMs(220)) return;
         }
-        adjustSpinPairAsymmetry(spinHi80Err[0], spinHi80Err[1]);
-        if (spin80Ok) bestSpinMax = 80;
-    } else {
-        if (tuneCheckAbort()) return;
-        float peakOver = 0.0f, settledErr = 0.0f, yaw0 = 0.0f, yaw1 = 0.0f;
-        measureSpinTrial(90.0f, 55, peakOver, settledErr, yaw0, yaw1);
-        Serial.printf("[TUNE] SPIN CAP(55) yaw=%.1f->%.1f peak=%+.1f err=%+.1f fault=%d\n",
-                      yaw0, yaw1, peakOver, settledErr, (int)s_tuneFault);
-        if (s_tuneFault != 0) return;
-        outSpinErr = settledErr;
-        if (peakOver <= 8.5f && fabsf(settledErr) <= 4.0f) {
-            adjustSpinGains(peakOver, settledErr);
-            bestSpinMax = 55;
-        }
-        if (onProgress) onProgress("SPIN CAP (55)", 56, settledErr);
-        if (!tunePauseMs(260)) return;
     }
-    spinMaxSpeed = bestSpinMax;
+
+    // --- Stage 2 & 3: SPIN BEST-SEARCH RIGHT/LEFT -> COMBINE + VERIFY PAIR + POLISH ---
+    {
+        float bestThrR = probeThr, bestErrR = 999.0f, bestPeakR = 999.0f;
+        if (!tuneSpinSideThreshold(90.0f, bestSpinMax, probeThr, "SPIN R", "SPIN RIGHT", 18, 12,
+                                   bestThrR, bestErrR, bestPeakR, onProgress)) return;
+
+        float bestThrL = bestThrR, bestErrL = 999.0f, bestPeakL = 999.0f;
+        if (!tuneSpinSideThreshold(-90.0f, bestSpinMax, bestThrR, "SPIN L", "SPIN LEFT", 30, 12,
+                                   bestThrL, bestErrL, bestPeakL, onProgress)) return;
+
+        if (bestSpinMax > 50 &&
+            (fabsf(bestErrR) > 2.0f || fabsf(bestErrL) > 2.0f || bestPeakR > 4.5f || bestPeakL > 4.5f)) {
+            bestSpinMax = (bestSpinMax >= 80) ? 70 : ((bestSpinMax >= 70) ? 60 : 50);
+            spinKd = constrain(spinKd + 0.08f, 0.60f, 2.00f);
+            if (!tuneSpinSideThreshold(90.0f, bestSpinMax, bestThrR, "SPIN R2", "SPIN RIGHT*", 42, 2,
+                                       bestThrR, bestErrR, bestPeakR, onProgress)) return;
+            if (!tuneSpinSideThreshold(-90.0f, bestSpinMax, bestThrL, "SPIN L2", "SPIN LEFT*", 44, 2,
+                                       bestThrL, bestErrL, bestPeakL, onProgress)) return;
+        }
+
+        // dirSpinThr = threshold + (spinRight ? -spinLeftOffsetDeg : spinLeftOffsetDeg)
+        // +90 -> thr - slofs = bestThrR, -90 -> thr + slofs = bestThrL
+        float candThr1 = constrain((bestThrR + bestThrL) * 0.5f, 1.0f, 14.0f);
+        float candOfs1 = constrain((bestThrL - bestThrR) * 0.5f, -5.0f, 5.0f);
+        threshold_spinDegree = candThr1;
+        spinLeftOffsetDeg    = candOfs1;
+
+        float ver1R = 0.0f, ver1L = 0.0f, ver1Peak = 0.0f;
+        if (!verifySpinPair("SPIN VER1", "SPIN VERIFY", 50, bestSpinMax,
+                            ver1R, ver1L, ver1Peak, onProgress)) return;
+        (void)ver1Peak;
+        float bestVerR = ver1R, bestVerL = ver1L;
+        float bestVerScore = fabsf(ver1R) + fabsf(ver1L);
+
+        if (fabsf(ver1R) > 1.0f || fabsf(ver1L) > 1.0f) {
+            float polThrR = (fabsf(ver1R) > 0.6f)
+                                ? constrain(bestThrR + constrain(ver1R * 0.55f, -2.0f, 2.0f), 1.0f, 14.0f)
+                                : bestThrR;
+            float polThrL = (fabsf(ver1L) > 0.6f)
+                                ? constrain(bestThrL + constrain(ver1L * 0.55f, -2.0f, 2.0f), 1.0f, 14.0f)
+                                : bestThrL;
+            threshold_spinDegree = constrain((polThrR + polThrL) * 0.5f, 1.0f, 14.0f);
+            spinLeftOffsetDeg    = constrain((polThrL - polThrR) * 0.5f, -5.0f, 5.0f);
+            float ver2R = 0.0f, ver2L = 0.0f, ver2Peak = 0.0f;
+            if (!verifySpinPair("SPIN VER2", "SPIN RE-VER", 55, bestSpinMax,
+                                ver2R, ver2L, ver2Peak, onProgress)) return;
+            (void)ver2Peak;
+            float score2 = fabsf(ver2R) + fabsf(ver2L);
+            if (score2 <= bestVerScore) {
+                bestVerR = ver2R;
+                bestVerL = ver2L;
+            } else {
+                threshold_spinDegree = candThr1;
+                spinLeftOffsetDeg    = candOfs1;
+            }
+        }
+        outSpinErr   = (fabsf(bestVerR) > fabsf(bestVerL)) ? bestVerR : bestVerL;
+        spinMaxSpeed = bestSpinMax;
+    }
 
     // --- Stage 4: TURN FRONT SAFE PROBE -> BEST-SEARCH RIGHT/LEFT -> FINAL VERIFY ---
     {
