@@ -387,6 +387,7 @@ void closeDropB() {
 
 void DropF() {
     driveStop();
+    clearTurnDistCarry();
     missionNotifyCommand("DropF();", 11); // CMD_ICON_DROP_F
     setServoAngle(SERVO_S0, frontDrop);
     delay(servoDropDelayMs);
@@ -396,6 +397,7 @@ void DropF() {
 
 void DropB() {
     driveStop();
+    clearTurnDistCarry();
     missionNotifyCommand("DropB();", 12); // CMD_ICON_DROP_B
     setServoAngle(SERVO_S1, backDrop);
     delay(servoDropDelayMs);

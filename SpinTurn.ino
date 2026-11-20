@@ -44,6 +44,7 @@ static bool spinWaitSettleMs(unsigned long waitMs) {
 
 static void spinDegreeCore(float relativeDeg, float threshold, int maxSpeedOverride,
                            bool stopAtEnd, bool notifyHud) {
+    clearTurnDistCarry();
     current_degree = wrapDeg180(current_degree + relativeDeg);
     bool hudNotified = !notifyHud;
 
@@ -265,6 +266,7 @@ static void turnSwingCore(float relativeDeg, float threshold, int maxSpeedOverri
     bool hudNotified = !notifyHud;
 
     if (fabsf(relativeDeg) < 0.5f) {
+        clearTurnDistCarry();
         if (stopAtEnd) {
             driveStop();
             if (notifyHud) missionFinishCommandBeep();
@@ -299,6 +301,9 @@ static void turnSwingCore(float relativeDeg, float threshold, int maxSpeedOverri
     bool reachedTarget = false;
     bool inRollOut = false;
     unsigned long rollOutStartMs = 0;
+    float rollOutArcDeg    = fabsf(relativeDeg);
+    float rollOutNewAxisCm = 0.0f;
+    long  rollPrevEnc[4]   = { 0, 0, 0, 0 };
     const float blendZoneDeg = min(22.0f, fabsf(relativeDeg) * 0.35f);
     int lastErrSign    = 0;
     int lastOuterSpd   = 0;
@@ -358,14 +363,29 @@ static void turnSwingCore(float relativeDeg, float threshold, int maxSpeedOverri
         int errSign = (error > 0.0f) ? 1 : -1;
 
         if (!stopAtEnd && !inRollOut) {
-            if (fabsf(error) <= blendZoneDeg ||
-                (didMove && lastErrSign != 0 && errSign != lastErrSign)) {
+            bool crossedZero = (didMove && lastErrSign != 0 && errSign != lastErrSign);
+            if (fabsf(error) <= blendZoneDeg || crossedZero) {
                 inRollOut = true;
                 rollOutStartMs = now;
+                rollOutArcDeg = crossedZero
+                                    ? fabsf(relativeDeg)
+                                    : constrain(fabsf(relativeDeg) - fabsf(error), 0.0f, fabsf(relativeDeg));
+                readPtEncoders(rollPrevEnc);
             }
         }
 
         if (inRollOut) {
+            long curEnc[4];
+            readPtEncoders(curEnc);
+            float dL = 0.5f * (float)((curEnc[0] - rollPrevEnc[0]) + (curEnc[1] - rollPrevEnc[1]));
+            float dR = 0.5f * (float)((curEnc[2] - rollPrevEnc[2]) + (curEnc[3] - rollPrevEnc[3]));
+            for (int i = 0; i < 4; i++) rollPrevEnc[i] = curEnc[i];
+            float signedTicks = isBack ? (-0.5f * (dL + dR)) : (0.5f * (dL + dR));
+            if (signedTicks > 0.0f && signedTicks < 800.0f) {
+                float stepCm = signedTicks / max(80.0f, ticksPerCm);
+                rollOutNewAxisCm += stepCm * cosf(fabsf(error) * 0.0174532925f);
+            }
+
             float absErr  = fabsf(error);
             float absRate = fabsf(fusedRate100ms);
             unsigned long rollElapsed = now - rollOutStartMs;
@@ -481,6 +501,23 @@ static void turnSwingCore(float relativeDeg, float threshold, int maxSpeedOverri
         driveStop();
         if (stopAtEnd && notifyHud && s_tuneFault == 0) missionFinishCommandBeep();
     }
+
+    if (!stopAtEnd && !s_tuneActive && enableTurnDistComp && reachedTarget) {
+        float thetaRad = constrain(fabsf(relativeDeg), 5.0f, 135.0f) * 0.0174532925f;
+        float alphaRad = constrain(rollOutArcDeg, 0.0f, fabsf(relativeDeg)) * 0.0174532925f;
+        float innerScale = (turnInnerRatio > 0.01f && turnInnerRatio < 0.85f)
+                               ? ((1.0f + turnInnerRatio) / (1.0f - turnInnerRatio))
+                               : 1.0f;
+        float effR = max(0.0f, turnExitRadiusCm) * innerScale;
+        float arcFactor = (1.0f - cosf(alphaRad)) * sinf(thetaRad)
+                        + (sinf(alphaRad) - tanf(thetaRad * 0.5f)) * cosf(thetaRad);
+        float arcNewCm  = max(0.0f, effR * arcFactor);
+        float rollCm    = constrain(rollOutNewAxisCm, 0.0f, 15.0f);
+        float exitCm    = constrain(arcNewCm + rollCm, 0.0f, 22.0f);
+        setTurnDistCarry(isBack ? -exitCm : exitCm);
+    } else {
+        clearTurnDistCarry();
+    }
 }
 
 void spinDegree(int relative_degree) {
@@ -529,6 +566,7 @@ void TrunDegreeBack(float relativeDeg, int maxSpeed, bool stopAtEnd) {
 // ============================================================================
 static void curveTurnEnc(int speedLeft, int speedRight, long distanceCm,
                          float angleDeg, bool reverseDir, const char* cmdLabel) {
+    clearTurnDistCarry();
     byte channelEncoder = (speedLeft < speedRight) ? 2 : 0;
     float deltaDeg = ((speedLeft < speedRight) ^ reverseDir) ? -angleDeg : angleDeg;
     current_degree = wrapDeg180(current_degree + deltaDeg);
@@ -1108,6 +1146,7 @@ static void autoTuneRunStages(float &outSpinErr, float &outTurnErr,
 
 void autoTuneSpinAndTurn(float &outSpinErr, float &outTurnErr,
                          void (*onProgress)(const char* stage, int pct, float lastErr)) {
+    clearTurnDistCarry();
     outSpinErr = 0.0f;
     outTurnErr = 0.0f;
     s_tuneActive = true;
@@ -1116,6 +1155,7 @@ void autoTuneSpinAndTurn(float &outSpinErr, float &outTurnErr,
     autoTuneRunStages(outSpinErr, outTurnErr, onProgress);
 
     driveStop();
+    clearTurnDistCarry();
     s_tuneActive = false;
     if (s_tuneFault != 0) {
         outSpinErr = 900.0f + (float)s_tuneFault;

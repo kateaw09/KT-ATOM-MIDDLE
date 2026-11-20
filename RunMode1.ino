@@ -5,12 +5,5 @@
 extern int speed;
 
 void runMode1() {
-    FC(100, 30.0f, 'R');
-    FC(100, 30.0f, 'L');
-    FC(100, 30.0f, 'L');
-    FC(100, 30.0f, 'R');
-    FC(100, 30.0f, 'R');
-    FC(100, 30.0f);
-    DropF(30);
-    
+ 
 }

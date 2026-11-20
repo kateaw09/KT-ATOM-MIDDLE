@@ -9,7 +9,7 @@ Preferences cfgPrefs;
 // ============================================================================
 
 // --- 1.1 ตั้งค่าโหมดการทำงานหลัก ---
-bool enableMultiMode = true;   // true = กด B เปลี่ยนโหมด 1-3, กด A รัน | false = กด A หรือ B รันทันที
+bool enableMultiMode = false;   // true = กด B เปลี่ยนโหมด 1-3, กด A รัน | false = กด A หรือ B รันทันที
 int  currentRunMode  = 1;      // โหมดเริ่มต้น = 1 (มี 1, 2, 3)
 
 // --- 1.2 ค่า PID และพารามิเตอร์การเคลื่อนที่ (PT_MIDDLE_ENC_2026Endcode4 + KT_Optimize) ---
@@ -52,14 +52,14 @@ unsigned long ramp_up_time_turn   = 0;
 unsigned long ramp_down_time_turn = 0;
 
 // ค่าควบคุมการหมุนและเลี้ยว (จูนสำหรับหุ่น ~300g, ฐานล้อ 7.5 ซม., กว้างซ้าย-ขวา 11.5 ซม.)
-float threshold_spinDegree  = 3.4f;    // ขอบเขตหยุดหมุน Spin (องศา)
+float threshold_spinDegree  = 8.57f;    // ขอบเขตหยุดหมุน Spin (องศา)
 float spinLeftOffsetDeg     = 0.0f;    // ชดเชยหมุนซ้ายแรงกว่าขวาใน Spin (+ = หมุนซ้ายหยุดเร็วขึ้น)
-float smallAngle_threshold  = 55.0f;   // ช่วงชะลอเข้าความเร็วต่ำก่อนหยุด Spin (องศาสุดท้าย)
-float smallAngle_turnDegree = 5.95f;    // ขอบเขตหยุดเลี้ยว Swing Turn (องศา — ชะลอเข้ามุมแล้วหยุดนุ่มไม่เหวี่ยง)
+float smallAngle_threshold  = 57.0f;   // ช่วงชะลอเข้าความเร็วต่ำก่อนหยุด Spin (องศาสุดท้าย)
+float smallAngle_turnDegree = 5.73f;    // ขอบเขตหยุดเลี้ยว Swing Turn (องศา — ชะลอเข้ามุมแล้วหยุดนุ่มไม่เหวี่ยง)
 float turnRightOffsetDeg    = 0.0f;    // ชดเชยความต่างล้อซ้าย/ขวาตอนเลี้ยว Swing (+ = ล้อซ้ายขับ/เลี้ยวขวาหยุดเร็วขึ้น)
 
-float spinKp      = 1.3f;      // หมุนอยู่กับที่ (spinDegree): Kp
-float spinKd      = 1.52f;     // หมุนอยู่กับที่ (spinDegree): Kd (หน่วงแรงเฉื่อยจากอัตราการหมุน IMU deg/100ms)
+float spinKp      = 1.26f;      // หมุนอยู่กับที่ (spinDegree): Kp
+float spinKd      = 1.6f;     // หมุนอยู่กับที่ (spinDegree): Kd (หน่วงแรงเฉื่อยจากอัตราการหมุน IMU deg/100ms)
 int   spinMinSpeed = 20;       // หมุนอยู่กับที่: ความเร็วต่ำสุด
 int   spinMaxSpeed = 80;       // หมุนอยู่กับที่: ความเร็วสูงสุด
 unsigned long spinPostDelayMs = 35; // ดีเลย์รอนิ่งหลังหมุน Spin ก่อนทำคำสั่งถัดไป (20-80 ms)
@@ -69,11 +69,18 @@ float turnFrontKd = 1.3f;     // เลี้ยวไปข้างหน้�
 int   turnFrontMinSpeed = 26;  // เลี้ยวไปข้างหน้า: ความเร็วช่วงชะลอเข้ามุม (กันเหวี่ยง/ไม่สะดุด)
 int   turnFrontMaxSpeed = 100;  // เลี้ยวไปข้างหน้า: ความเร็วสูงสุดช่วงเลี้ยว (70-100)
 
-float turnBackKp  = 1.25f;     // เลี้ยวไปข้างหลัง (turnDegreeBack): Kp
+float turnBackKp  = 1.33f;     // เลี้ยวไปข้างหลัง (turnDegreeBack): Kp
 float turnBackKd  = 1.3f;     // เลี้ยวไปข้างหลัง (turnDegreeBack): Kd (หน่วงช่วงเข้ามุมลดอาการเหวี่ยง)
 int   turnBackMinSpeed  = 26;  // เลี้ยวไปข้างหลัง: ความเร็วช่วงชะลอเข้ามุม (กันเหวี่ยง/ไม่สะดุด)
 int   turnBackMaxSpeed  = 100;  // เลี้ยวไปข้างหลัง: ความเร็วสูงสุดช่วงเลี้ยว (70-100)
 float turnInnerRatio    = 0.0f;  // 0.0 = ล้อฝั่งในหยุดหมุน (วงเลี้ยวแคบแบบเดิม), >0 = ล้อในหมุนตามสัดส่วน
+
+// ค่าชดเชยระยะเข้า-ออกโค้ง Swing Turn (ฐานล้อ L=7.5 ซม., กว้างล้อ W=11.5 ซม.)
+const float ROBOT_WHEELBASE_CM = 7.5f;   // ระยะกลางล้อหน้าถึงกลางล้อหลัง (ซม.)
+const float ROBOT_TRACK_CM     = 11.5f;  // ระยะกลางล้อซ้ายถึงกลางล้อขวา (ซม.)
+bool  enableTurnDistComp       = true;   // true = เปิดชดเชยระยะเข้า-ออกโค้งอัตโนมัติ
+float turnEntryCompCm          = 6.8f;   // ระยะลดก่อนเริ่มเลี้ยว Swing 90° (45° สเกลอัตโนมัติ = x0.414)
+float turnExitRadiusCm         = 6.3f;   // รัศมีโค้งฐานช่วงออกเลี้ยว 90° (+ บวกระยะ Roll-Out สดจาก Encoder)
 
 unsigned long delayALL = 0;    // หน่วงเวลาหลังคำสั่งเดินด้วยเวลา (ms)
 

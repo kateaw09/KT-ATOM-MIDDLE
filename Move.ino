@@ -18,6 +18,32 @@ static unsigned long s_beepStopMs      = 0;
 static bool          s_beepActive      = false;
 
 float current_degree = 0.0f;
+float g_turnExitCarryCm = 0.0f; // + = เยื้องไปข้างหน้าตามแกนหัวหุ่น, - = เยื้องไปข้างหลัง
+
+void clearTurnDistCarry() {
+    g_turnExitCarryCm = 0.0f;
+}
+
+void setTurnDistCarry(float signedCm) {
+    g_turnExitCarryCm = enableTurnDistComp ? constrain(signedCm, -22.0f, 22.0f) : 0.0f;
+}
+
+static float calcTurnEntryCompCm(float absAngleDeg) {
+    if (!enableTurnDistComp || absAngleDeg < 5.0f) return 0.0f;
+    float halfRad = constrain(absAngleDeg, 5.0f, 135.0f) * 0.5f * 0.0174532925f;
+    float innerScale = (turnInnerRatio > 0.01f && turnInnerRatio < 0.85f)
+                           ? ((1.0f + turnInnerRatio) / (1.0f - turnInnerRatio))
+                           : 1.0f;
+    return constrain(turnEntryCompCm * tanf(halfRad) * innerScale, 0.0f, 18.0f);
+}
+
+static float consumeTurnDistCarry(float rawCm, bool forward, float entryCompCm) {
+    float carry = enableTurnDistComp ? g_turnExitCarryCm : 0.0f;
+    g_turnExitCarryCm = 0.0f;
+    float signedPrev = forward ? carry : -carry;
+    float adj = rawCm - signedPrev - entryCompCm;
+    return (adj > 0.0f) ? adj : 0.0f;
+}
 
 static int           s_activeIcon      = 0;
 static int           s_lastDrawnIcon   = -1;
@@ -79,6 +105,7 @@ void resetTargetYaw() {
     delay(5);
     current_degree = 0.0f;
     fusedHeadingSyncToImu();
+    clearTurnDistCarry();
 }
 
 unsigned long missionElapsedMs() {
@@ -183,6 +210,7 @@ static void missionHudTask(void* param) {
 void missionStartTimer(int modeNum) {
     if (s_tftMutex == nullptr) s_tftMutex = xSemaphoreCreateMutex();
 
+    clearTurnDistCarry();
     s_missionStartMs  = millis();
     s_pausedTotalMs   = 0;
     s_pauseStartMs    = 0;
@@ -218,6 +246,7 @@ void missionStartTimer(int modeNum) {
 }
 
 void missionEndTimer() {
+    clearTurnDistCarry();
     s_missionRunning = false;
     unsigned long waitStart = millis();
     while (s_hudTaskHandle != nullptr && millis() - waitStart < 200UL) {
@@ -453,12 +482,22 @@ static void baseMoveEncInternal(int Min_speed, int Max_speed, float distance_cm,
 
 void BaseFFE(int Min_speed, int Max_speed, long encoder_target,
              unsigned long Ramp_up, long Ramp_down, float KP, float KD, bool stop_at_end) {
-    baseMoveEncInternal(Min_speed, Max_speed, (float)encoder_target, Ramp_up, Ramp_down, KP, KD, true, stop_at_end);
+    float adjCm = consumeTurnDistCarry((float)encoder_target, true, 0.0f);
+    if (adjCm <= 0.3f) {
+        if (stop_at_end) driveStop();
+        return;
+    }
+    baseMoveEncInternal(Min_speed, Max_speed, adjCm, Ramp_up, Ramp_down, KP, KD, true, stop_at_end);
 }
 
 void baseBBE(int Min_speed, int Max_speed, long encoder_target,
              unsigned long Ramp_up, long Ramp_down, float KP, float KD, bool stop_at_end) {
-    baseMoveEncInternal(Min_speed, Max_speed, (float)encoder_target, Ramp_up, Ramp_down, KP, KD, false, stop_at_end);
+    float adjCm = consumeTurnDistCarry((float)encoder_target, false, 0.0f);
+    if (adjCm <= 0.3f) {
+        if (stop_at_end) driveStop();
+        return;
+    }
+    baseMoveEncInternal(Min_speed, Max_speed, adjCm, Ramp_up, Ramp_down, KP, KD, false, stop_at_end);
 }
 
 static void execSpinSelect(char select) {
@@ -541,28 +580,39 @@ static void moveEncTurnWithHud(int speed, float cm, bool forward, bool stopAtEnd
     if (stopAtEnd) missionFinishCommandBeep();
 }
 
-void FC(int speed, float cm, bool stopAtEnd) {
+static void moveStraightEncComp(int speed, float cm, bool forward, bool stopAtEnd,
+                                unsigned long rUp, long rDown) {
+    float adjCm = consumeTurnDistCarry(cm, forward, 0.0f);
+    if (adjCm <= 0.3f) {
+        if (stopAtEnd) {
+            driveStop();
+            missionFinishCommandBeep();
+        }
+        return;
+    }
     char cmdBuf[24];
-    snprintf(cmdBuf, sizeof(cmdBuf), "FC(%d,%.0f);", speed, cm);
-    moveEncTurnWithHud(speed, cm, true, stopAtEnd, ramp_up_turn, ramp_down_turn, cmdBuf);
+    if (fabsf(adjCm - cm) >= 0.1f) {
+        snprintf(cmdBuf, sizeof(cmdBuf), forward ? "FC(%d,%.1f);" : "BC(%d,%.1f);", speed, adjCm);
+    } else {
+        snprintf(cmdBuf, sizeof(cmdBuf), forward ? "FC(%d,%.0f);" : "BC(%d,%.0f);", speed, cm);
+    }
+    moveEncTurnWithHud(speed, adjCm, forward, stopAtEnd, rUp, rDown, cmdBuf);
+}
+
+void FC(int speed, float cm, bool stopAtEnd) {
+    moveStraightEncComp(speed, cm, true, stopAtEnd, ramp_up_turn, ramp_down_turn);
 }
 
 void FC(int speed, float cm, int rUp, int rDown) {
-    char cmdBuf[24];
-    snprintf(cmdBuf, sizeof(cmdBuf), "FC(%d,%.0f);", speed, cm);
-    moveEncTurnWithHud(speed, cm, true, true, (unsigned long)max(0, rUp), (long)max(0, rDown), cmdBuf);
+    moveStraightEncComp(speed, cm, true, true, (unsigned long)max(0, rUp), (long)max(0, rDown));
 }
 
 void BC(int speed, float cm, bool stopAtEnd) {
-    char cmdBuf[24];
-    snprintf(cmdBuf, sizeof(cmdBuf), "BC(%d,%.0f);", speed, cm);
-    moveEncTurnWithHud(speed, cm, false, stopAtEnd, ramp_up_turn, ramp_down_turn, cmdBuf);
+    moveStraightEncComp(speed, cm, false, stopAtEnd, ramp_up_turn, ramp_down_turn);
 }
 
 void BC(int speed, float cm, int rUp, int rDown) {
-    char cmdBuf[24];
-    snprintf(cmdBuf, sizeof(cmdBuf), "BC(%d,%.0f);", speed, cm);
-    moveEncTurnWithHud(speed, cm, false, true, (unsigned long)max(0, rUp), (long)max(0, rDown), cmdBuf);
+    moveStraightEncComp(speed, cm, false, true, (unsigned long)max(0, rUp), (long)max(0, rDown));
 }
 
 static void moveCompoundTurn(int speed, float cm, char dir, bool forward, float angleOverride,
@@ -580,14 +630,25 @@ static void moveCompoundTurn(int speed, float cm, char dir, bool forward, float 
         turnAngle = isLeft ? -mag : mag;
     }
 
+    float entryCompCm = (isValid && !doStopAndSpin) ? calcTurnEntryCompCm(fabsf(turnAngle)) : 0.0f;
+    float adjCm = consumeTurnDistCarry(cm, forward, entryCompCm);
+
     s_inCompoundCmd  = true;
     s_compoundBeeped = false;
     snprintf(s_compoundMain, sizeof(s_compoundMain), fmtMain, speed, cm, dir);
 
-    char subBuf[20];
-    snprintf(subBuf, sizeof(subBuf), forward ? "FC(%d,%.0f)" : "BC(%d,%.0f)", speed, cm);
     long effectiveRDown = doStopAndSpin ? rDown : 0;
-    moveEncTurnWithHud(speed, cm, forward, doStopAndSpin, rUp, effectiveRDown, subBuf);
+    if (adjCm > 0.3f) {
+        char subBuf[22];
+        if (fabsf(adjCm - cm) >= 0.1f) {
+            snprintf(subBuf, sizeof(subBuf), forward ? "FC(%d,%.1f)" : "BC(%d,%.1f)", speed, adjCm);
+        } else {
+            snprintf(subBuf, sizeof(subBuf), forward ? "FC(%d,%.0f)" : "BC(%d,%.0f)", speed, cm);
+        }
+        moveEncTurnWithHud(speed, adjCm, forward, doStopAndSpin, rUp, effectiveRDown, subBuf);
+    } else if (doStopAndSpin) {
+        driveStop();
+    }
 
     if (!isValid) {
         driveStop();
@@ -648,6 +709,7 @@ void BC4(int speed, float cm, char dir, bool stopBeforeTurn) {
 static void baseMoveTimeInternal(int Min_speed, int Max_speed, unsigned long time_target,
                                  unsigned long Ramp_up, unsigned long Ramp_down,
                                  float KP, float KD, bool forward, bool stop_at_end) {
+    clearTurnDistCarry();
     int max_speed = Max_speed;
     int min_speed = min(Min_speed, max_speed);
     int current_speed = min_speed;
@@ -833,6 +895,7 @@ bool SetFront_Yaw(int speed, unsigned long target, char select) {
 }
 
 void SetFront(int speed) {
+    clearTurnDistCarry();
     float previous_error = wrapAngle180(current_degree - readAngle(YAW));
     unsigned long start_time = millis();
     int spd = constrain(abs(speed), 15, 60);
@@ -851,6 +914,7 @@ void SetFront(int speed) {
 }
 
 void SetFront_drop(int speed) {
+    clearTurnDistCarry();
     float previous_error = wrapAngle180(current_degree - readAngle(YAW));
     unsigned long start_time = millis();
     int spd = constrain(abs(speed), 15, 60);
@@ -938,6 +1002,7 @@ bool SetBack_Yaw(int speed, unsigned long target, char select) {
 }
 
 void SetBack(int speed) {
+    clearTurnDistCarry();
     float previous_error = wrapAngle180(current_degree - readAngle(YAW));
     unsigned long start_time = millis();
     int spd = constrain(abs(speed), 15, 60);
@@ -956,6 +1021,7 @@ void SetBack(int speed) {
 }
 
 void SetBack_drop(int speed) {
+    clearTurnDistCarry();
     float previous_error = wrapAngle180(current_degree - readAngle(YAW));
     unsigned long start_time = millis();
     int spd = constrain(abs(speed), 15, 60);
