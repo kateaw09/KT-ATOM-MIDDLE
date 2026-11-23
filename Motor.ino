@@ -58,9 +58,13 @@ void resetMoveSpeedBalance() {
     s_wheelInitialized   = false;
 }
 
+static inline int64_t abs64(int64_t v) {
+    return (v < 0) ? -v : v;
+}
+
 static long calcEncoderDelta(long currentTicks, long prevTicks) {
-    long delta = currentTicks - prevTicks;
-    return (delta < 0) ? -delta : delta;
+    int64_t delta = (int64_t)currentTicks - (int64_t)prevTicks;
+    return (long)abs64(delta);
 }
 
 static void updateWheelSpeedBalance(int leftCommand, int rightCommand) {
@@ -110,7 +114,7 @@ static void updateWheelSpeedBalance(int leftCommand, int rightCommand) {
     for (byte side = 0; side < 2; side++) {
         byte firstEnc  = side * 2;
         byte secondEnc = firstEnc + 1;
-        long totalTicks = tickDelta[firstEnc] + tickDelta[secondEnc];
+        int64_t totalTicks = (int64_t)tickDelta[firstEnc] + (int64_t)tickDelta[secondEnc];
 
         if (sideCommands[side] == 0 || totalTicks == 0) {
             continue;
@@ -295,16 +299,16 @@ void motorWriteSpeedBalanced(int leftCommand, int rightCommand) {
 }
 
 void driveMotors(int leftSpeed, int rightSpeed) {
-    int trimL = (motorTrim < 0) ? motorTrim : 0; // ค่าลบ = ลดความเร็วฝั่งซ้าย
-    int trimR = (motorTrim > 0) ? motorTrim : 0; // ค่าบวก = เพิ่มความเร็วฝั่งขวา
+    int trimL = getLeftMotorTrim();  // ค่า <= 0: ลดความเร็วฝั่งซ้าย
+    int trimR = getRightMotorTrim(); // ค่า <= 0: ลดความเร็วฝั่งขวา
 
     int left  = leftSpeed;
     int right = rightSpeed;
-    if (leftSpeed > 0)       left += trimL;
-    else if (leftSpeed < 0)  left -= trimL;
+    if (leftSpeed > 0)       left = max(0, leftSpeed + trimL);
+    else if (leftSpeed < 0)  left = min(0, leftSpeed - trimL);
 
-    if (rightSpeed > 0)      right += trimR;
-    else if (rightSpeed < 0) right -= trimR;
+    if (rightSpeed > 0)      right = max(0, rightSpeed + trimR);
+    else if (rightSpeed < 0) right = min(0, rightSpeed - trimR);
 
     // M1, M2 = ฝั่งซ้าย (M1 หน้า, M2 หลัง) | M3, M4 = ฝั่งขวา (M3 หน้า, M4 หลัง)
     safeMotorWrite2(constrain(left, -100, 100), constrain(right, -100, 100));
@@ -326,36 +330,33 @@ const float ENCODER_WHEEL_DIAMETER_CM = 3.3f;
 const float ENCODER_BASE_TICKS_PER_CM = 1300.0f / (3.14159265f * ENCODER_WHEEL_DIAMETER_CM);
 
 float encoderCountsPerRevolution(int speed) {
-    if (speed < 0) speed = -speed;
-    if (speed >= 70) return 1000.0f;
-    if (speed >= 50) return 1200.0f;
+    (void)speed;
     return 1300.0f;
 }
 
 long encoderCentimetersToTicks(float distanceCm, int speed) {
-    if (distanceCm <= 0.0f) return 0;
-    const float wheel_circumference_cm = 3.14159265f * ENCODER_WHEEL_DIAMETER_CM;
-    const float ticks_per_cm = encoderCountsPerRevolution(speed) / wheel_circumference_cm;
-    float calScale  = max(1.0f, ticksPerCm) / ENCODER_BASE_TICKS_PER_CM;
+    (void)speed;
+    if (distanceCm <= 0.0f) return 0L;
+    float tpcm = max(1.0f, ticksPerCm);
     float tuneScale = constrain((300.0f + (float)distTuneMm) / 300.0f, 0.50f, 1.50f);
-    return (long)roundf(distanceCm * ticks_per_cm * calScale * tuneScale);
+    return (long)llround((double)distanceCm * (double)tpcm * (double)tuneScale);
 }
 
 long readEncoderDistance() {
     long c[4];
     readPtEncoders(c);
-    float total = fabsf((float)c[0]) + fabsf((float)c[1]) +
-                  fabsf((float)c[2]) + fabsf((float)c[3]);
-    return (long)roundf(total * 0.25f);
+    int64_t total = abs64((int64_t)c[0]) + abs64((int64_t)c[1]) +
+                    abs64((int64_t)c[2]) + abs64((int64_t)c[3]);
+    return (long)((total + 2LL) / 4LL);
 }
 
 long readEncoderSingleDistance(byte channelEncoder) {
     if (channelEncoder >= 3) return 0;
     long c[4];
     readPtEncoders(c);
-    float firstTicks  = fabsf((float)c[channelEncoder]);
-    float secondTicks = fabsf((float)c[channelEncoder + 1]);
-    return (long)roundf((firstTicks + secondTicks) * 0.5f);
+    int64_t firstTicks  = abs64((int64_t)c[channelEncoder]);
+    int64_t secondTicks = abs64((int64_t)c[channelEncoder + 1]);
+    return (long)((firstTicks + secondTicks + 1LL) / 2LL);
 }
 
 void resetEncoder() {

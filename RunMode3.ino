@@ -5,7 +5,25 @@
 extern int speed;
 
 void runMode3() {
-    FC(60, 40.0f, false);
-    SpinDegree(90.0f);
-    BC(50, 20.0f);
+    M3_Box1();
+    M3_Box2();
+    M3_Box3();
+    M3_Box4();
+    M3_EndMission();
+}
+
+void M3_Box1() {
+
+}
+
+void M3_Box2() {
+}
+
+void M3_Box3() {
+}
+
+void M3_Box4() {
+}
+
+void M3_EndMission() {
 }

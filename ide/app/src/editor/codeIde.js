@@ -5,6 +5,8 @@ export const DEFAULT_IDE_SETTINGS = {
   autocomplete: true,
   wordPrediction: true,
   parameterHints: true,
+  clickToSeekSim: true,
+  cameraFollowRobot: false,
   autoCloseBrackets: true,
   wordWrap: false,
   fontSize: 13,
@@ -41,8 +43,8 @@ const ROBOT_COMPLETIONS = [
   { label: 'TTB45', insert: 'TTB45(25, 80, 17);', sig: 'TTB45(spdL, spdR, cm)', desc: 'ตีโค้งถอยหลัง 45 องศาด้วย Encoder', kind: 'API' },
   { label: 'FF', insert: 'FF(60, 400);', sig: 'FF(speed, ms)', desc: 'เดินหน้าจับเวลา ms (เหมาะสำหรับข้ามสิ่งกีดขวาง)', kind: 'API' },
   { label: 'BB', insert: 'BB(50, 400);', sig: 'BB(speed, ms)', desc: 'ถอยหลังจับเวลา ms', kind: 'API' },
-  { label: 'SetF', insert: 'SetF(25, 10.0f);', sig: 'SetF(speed [, backCm [, dir]])', desc: 'จัดแนวเส้นด้านหน้า + รีเซ็ตมุม Yaw = 0', kind: 'API' },
-  { label: 'SetB', insert: 'SetB(25, 10.0f);', sig: 'SetB(speed [, fwdCm [, dir]])', desc: 'ถอยจัดแนวเส้นด้านหลัง + รีเซ็ตมุม Yaw = 0', kind: 'API' },
+  { label: 'SetF', insert: 'SetF(25, 10.0f);', sig: "SetF(speed [, backCm [, 'R'|'L']])", desc: 'จัดแนวเส้นด้านหน้า + รีเซ็ตมุม Yaw = 0 (-> ถอย -> หยุดหมุน Spin 90°)', kind: 'API' },
+  { label: 'SetB', insert: 'SetB(25, 10.0f);', sig: "SetB(speed [, fwdCm [, 'R'|'L']])", desc: 'ถอยจัดแนวเส้นด้านหลัง + รีเซ็ตมุม Yaw = 0 (-> เดินออก -> หยุดหมุน Spin 90°)', kind: 'API' },
   { label: 'DropF', insert: 'DropF(30);', sig: 'DropF([speed])', desc: 'เข้าเส้นหน้า (SetFront_drop) แล้วปล่อยลูกบาศก์ด้านหน้า', kind: 'API' },
   { label: 'DropB', insert: 'DropB(30);', sig: 'DropB([speed])', desc: 'เข้าเส้นหลัง (SetBack_drop) แล้วปล่อยลูกบาศก์ด้านหลัง', kind: 'API' },
   { label: 'STOP', insert: 'STOP();', sig: 'STOP()', desc: 'หยุดรอผู้ใช้กดปุ่ม A/B แล้วรีเซ็ต Yaw', kind: 'API' },
@@ -306,6 +308,8 @@ export function createCodeIdeController({
   getVariables,
   getConfigKeys,
   onFilesUpdated,
+  onCursorLineChange,
+  onSettingsChanged,
   appendConsole
 }) {
   let settings = loadSettings();
@@ -349,16 +353,21 @@ export function createCodeIdeController({
 
     stage.classList.toggle('syntax-on', !!settings.syntaxHighlight);
     stage.classList.toggle('wrap-on', !!settings.wordWrap);
+    document.documentElement.dataset.simSeek = settings.clickToSeekSim ? 'on' : 'off';
+    document.documentElement.dataset.camLock = settings.cameraFollowRobot ? 'on' : 'off';
 
     const flags = [];
     if (settings.syntaxHighlight) flags.push('Syntax');
     if (settings.autocomplete) flags.push('AutoComplete');
     if (settings.wordPrediction) flags.push('Predict');
+    if (settings.clickToSeekSim) flags.push('SimSeek');
+    if (settings.cameraFollowRobot) flags.push('CamLock');
     if (el('statusAssistState')) el('statusAssistState').textContent = flags.length ? flags.join(' · ') : 'Plain Text';
     if (el('statusIndentLabel')) el('statusIndentLabel').textContent = `Spaces: ${ts} · UTF-8 · Arduino C++`;
 
     syncSettingsModalControls();
     renderEditorVisuals();
+    if (typeof onSettingsChanged === 'function') onSettingsChanged({ ...settings });
   }
 
   function syncSettingsModalControls() {
@@ -367,6 +376,8 @@ export function createCodeIdeController({
       ['setAutocomplete', 'autocomplete'],
       ['setWordPrediction', 'wordPrediction'],
       ['setParameterHints', 'parameterHints'],
+      ['setClickToSeekSim', 'clickToSeekSim'],
+      ['setCameraFollowRobot', 'cameraFollowRobot'],
       ['setAutoCloseBrackets', 'autoCloseBrackets'],
       ['setWordWrap', 'wordWrap']
     ];
@@ -991,6 +1002,13 @@ export function createCodeIdeController({
     const ta = el('codeTextarea');
     if (!ta) return;
 
+    const notifyCursorLine = (trigger) => {
+      if (!settings.clickToSeekSim || typeof onCursorLineChange !== 'function') return;
+      const caret = ta.selectionStart ?? 0;
+      const lineNumber = ta.value.slice(0, caret).split('\n').length;
+      onCursorLineChange({ file: getActiveFile(), lineNumber, code: ta.value, trigger });
+    };
+
     ta.addEventListener('input', () => handleInput(true));
     ta.addEventListener('scroll', syncScroll);
     ta.addEventListener('keydown', handleKeyDown);
@@ -999,11 +1017,15 @@ export function createCodeIdeController({
         updateIntelligenceAndGhost(false);
       }
       renderEditorVisuals();
+      if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(e.key)) {
+        notifyCursorLine('key');
+      }
     });
     ta.addEventListener('click', () => {
       hideAutocomplete();
       updateSignatureHint();
       renderEditorVisuals();
+      notifyCursorLine('click');
     });
     ta.addEventListener('blur', () => {
       setTimeout(() => {
@@ -1011,6 +1033,28 @@ export function createCodeIdeController({
         if (el('signatureHintPopup')) el('signatureHintPopup').hidden = true;
       }, 150);
     });
+
+    const ln = el('lineNumbers');
+    if (ln) {
+      ln.addEventListener('click', (e) => {
+        const cs = getComputedStyle(ta);
+        const lh = parseFloat(cs.lineHeight) || 20;
+        const topPad = parseFloat(cs.paddingTop) || 12;
+        const rect = ln.getBoundingClientRect();
+        const relY = e.clientY - rect.top + ta.scrollTop - topPad;
+        const lines = ta.value.split('\n');
+        const targetLine = Math.max(1, Math.min(lines.length, Math.floor(relY / lh) + 1));
+
+        let charOffset = 0;
+        for (let i = 0; i < targetLine - 1; i++) charOffset += lines[i].length + 1;
+        const leadingWs = (lines[targetLine - 1].match(/^(\s*)/)?.[1] || '').length;
+        const caret = charOffset + leadingWs;
+        ta.focus();
+        ta.setSelectionRange(caret, caret);
+        renderEditorVisuals();
+        notifyCursorLine('gutter');
+      });
+    }
 
     if (el('btnCodeUndo')) el('btnCodeUndo').onclick = () => { undo(); ta.focus(); };
     if (el('btnCodeRedo')) el('btnCodeRedo').onclick = () => { redo(); ta.focus(); };
@@ -1040,6 +1084,8 @@ export function createCodeIdeController({
       ['setAutocomplete', 'autocomplete'],
       ['setWordPrediction', 'wordPrediction'],
       ['setParameterHints', 'parameterHints'],
+      ['setClickToSeekSim', 'clickToSeekSim'],
+      ['setCameraFollowRobot', 'cameraFollowRobot'],
       ['setAutoCloseBrackets', 'autoCloseBrackets'],
       ['setWordWrap', 'wordWrap']
     ];

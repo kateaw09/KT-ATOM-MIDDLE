@@ -648,10 +648,10 @@ static void screenIMU() {
 }
 
 // ============================================================================
-// Assembly Sub-menu 4: Read Encoder + Calibrate 30cm
-//    กด A = Reset 0, กด B = ย้อนกลับ, กด A+B = เข้าหน้า Calibrate 30cm
+// Assembly Sub-menu 4: Read Encoder + Calibrate 90cm
+//    กด A = Reset 0, กด B = ย้อนกลับ, กด A+B = เข้าหน้า Calibrate 90cm
 // ============================================================================
-static void screenDistance30cm();
+static void screenCalibrate90cm();
 
 static void drawEncoderLayout() {
     char rateBuf[12];
@@ -674,7 +674,7 @@ static void drawEncoderLayout() {
     tft.setCursor(86, 57); tft.print("M4:");
     tft.setTextColor(ST77XX_GREEN, ST77XX_BLACK);
     tft.setCursor(10, 91); tft.print("AVG:");
-    uiDrawBottomBar("[A]0 [B]Back", "[A+B]Cal30");
+    uiDrawBottomBar("[A]0 [B]Back", "[A+B]Cal90");
 }
 
 static void screenEncoder() {
@@ -689,9 +689,8 @@ static void screenEncoder() {
         for (int i = 0; i < 4; i++) {
             cm[i] = (float)c[i] / tpcm;
         }
-        float avgT  = (fabsf((float)c[0]) + fabsf((float)c[1]) +
-                       fabsf((float)c[2]) + fabsf((float)c[3])) * 0.25f;
-        float avgCm = avgT / tpcm;
+        long  avgT  = readEncoderDistance();
+        float avgCm = (float)avgT / tpcm;
 
         tft.setTextSize(1);
         // M1 (ซ้ายบน)
@@ -720,19 +719,19 @@ static void screenEncoder() {
 
         // AVG รวม
         tft.setTextColor(ST77XX_GREEN, ST77XX_BLACK);
-        tft.setCursor(36, 91); tft.printf("%5.0ft |%5.1fcm", avgT, avgCm);
+        tft.setCursor(36, 91); tft.printf("%6ld|%5.1fcm", avgT, avgCm);
 
         Serial.printf("ENC M1:%ld(%.1fcm) M2:%ld(%.1fcm) M3:%ld(%.1fcm) M4:%ld(%.1fcm)\n",
                       c[0], cm[0], c[1], cm[1], c[2], cm[2], c[3], cm[3]);
 
         int act = pollButtonAction();
         if (act == BTN_A) {
-            resetEncoders();
+            resetEncoder();
             maxBeep(80);
         } else if (act == BTN_B) {
             return;
         } else if (act == BTN_AB) {
-            screenDistance30cm();
+            screenCalibrate90cm();
             drawEncoderLayout();
         }
         delay(50);
@@ -740,192 +739,262 @@ static void screenEncoder() {
 }
 
 // ============================================================================
-// Assembly Sub-menu 5: Calibrate Distance (30 cm + Test 30 cm Verification)
+// Assembly Sub-menu 5: Calibrate Distance 90 cm (Dynamic Run + Flash Factor)
 // ============================================================================
-static void screenPush30cm() {
-    resetEncoders();
-    uiDrawTopBar("PUSH 30 CM", "STEP 1", UI_COLOR_TOP_BLUE);
-    tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
-    tft.setTextSize(1);
-    tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
-    tft.setCursor(8, 28);
-    tft.print("Push robot 30 cm now");
-    uiDrawBottomBar("[A+B] Save", "[A/B] Back");
-
-    while (true) {
-        long c[4];
-        readAllEncoders(c);
-        float avgTicks = (fabsf((float)c[0]) + fabsf((float)c[1]) +
-                          fabsf((float)c[2]) + fabsf((float)c[3])) * 0.25f;
-
-        tft.setTextSize(1);
-        tft.setTextColor(ST77XX_GREEN, ST77XX_BLACK);
-        tft.setCursor(8, 52); tft.printf("Ticks: %6.1f     ", avgTicks);
-        tft.setTextColor(0xFFE0, ST77XX_BLACK);
-        tft.setCursor(8, 70); tft.printf("Calc : %5.1f t/cm ", avgTicks / 30.0f);
-
-        int act = pollButtonAction();
-        if (act == BTN_AB) {
-            if (avgTicks >= 10.0f) {
-                ticksPerCm = avgTicks / 30.0f;
-                distTuneMm = 0;
-                configSave();
-                maxBeep(100);
-            }
-            return;
-        } else if (act == BTN_A || act == BTN_B) {
-            return;
-        }
-        delay(50);
+static void normalizeTicksPerCmFromLegacyTune() {
+    if (distTuneMm != 0) {
+        float tuneScale = constrain((300.0f + (float)distTuneMm) / 300.0f, 0.50f, 1.50f);
+        ticksPerCm = constrain(ticksPerCm * tuneScale, TICKS_PER_CM_MIN, TICKS_PER_CM_MAX);
+        distTuneMm = 0;
+        configSaveEncoderCalibration();
     }
 }
 
-static void screenTest30cmRun() {
-    // นับถอยหลัง 3 วินาที เพื่อให้วางหุ่นบนจุดเริ่มต้นและปล่อยมือได้ทัน
-    uiDrawTopBar("TEST 30 CM", "WAIT", UI_COLOR_TOP_ORANGE);
+static void showFlashSaveResult(bool ok, float oldTpcm, float newTpcm) {
+    long ticks90 = encoderCentimetersToTicks(CAL_TEST_DISTANCE_CM, max_speed_enc_turn);
+
+    uiDrawTopBar(ok ? "FLASH SAVED!" : "FLASH ERROR!", ok ? "OK" : "ERR",
+                 ok ? UI_COLOR_TOP_GREEN : ST77XX_RED);
     tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
-    tft.drawRoundRect(10, 24, 140, 78, 6, 0xFFE0);
-    tft.setTextSize(1);
-    tft.setTextColor(0x07FF, ST77XX_BLACK);
-    tft.setCursor(22, 30);
-    tft.print("Place at 0 cm!");
-    uiDrawBottomBar("[A/B] Cancel", "3s COUNT");
-
-    for (int sec = 3; sec >= 1; sec--) {
-        tft.setTextSize(4);
-        tft.setTextColor(0xFFE0, ST77XX_BLACK);
-        tft.setCursor(68, 48);
-        tft.printf("%d", sec);
-        maxBeep(60);
-
-        unsigned long t0 = millis();
-        while (millis() - t0 < 940UL) {
-            if (readSwitch(A) || readSwitch(B)) {
-                maxBeep(25);
-                waitBothReleased();
-                return;
-            }
-            delay(15);
-        }
-    }
-
-    uiDrawTopBar("TEST 30 CM", "RUN", UI_COLOR_TOP_ORANGE);
-    tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
-    tft.drawRoundRect(10, 26, 140, 74, 5, 0xFFE0);
-    tft.setTextSize(1);
-    tft.setTextColor(0x07FF, ST77XX_BLACK);
-    tft.setCursor(18, 52);
-    tft.print("Running 30.0 cm...");
-    uiDrawBottomBar("RUNNING", "30.0 CM");
-
-    maxBeep(120);
-    resetTargetYaw();
-    unsigned long tRunStart = millis();
-    FC(45, 30.0f, true);
-    unsigned long runElapsedMs = millis() - tRunStart;
-    if (runElapsedMs >= 150UL && runElapsedMs <= 15000UL) {
-        calRun30cmMs = (int)runElapsedMs;
-        configSave();
-    }
-    maxBeep(120);
-
-    long c[4];
-    readAllEncoders(c);
-    float avgTicks = (fabsf((float)c[0]) + fabsf((float)c[1]) +
-                      fabsf((float)c[2]) + fabsf((float)c[3])) * 0.25f;
-    float measuredCmPs = 30000.0f / (float)max(150, calRun30cmMs);
-
-    uiDrawTopBar("TEST RESULT", "30CM", UI_COLOR_TOP_GREEN);
-    tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
-    tft.drawRoundRect(8, 24, 144, 78, 5, ST77XX_GREEN);
+    tft.drawRoundRect(6, 22, 148, 84, 5, ok ? ST77XX_GREEN : ST77XX_RED);
     tft.setTextSize(1);
     tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
-    tft.setCursor(16, 30); tft.printf("Ticks : %.1f", avgTicks);
-    tft.setCursor(16, 44); tft.printf("Rate  : %.1f t/cm", ticksPerCm);
-    tft.setCursor(16, 58); tft.printf("Time  : %d ms", calRun30cmMs);
+    tft.setCursor(14, 28); tft.printf("Old : %6.2f t/cm", oldTpcm);
+    tft.setTextColor(0xFFE0, ST77XX_BLACK);
+    tft.setCursor(14, 44); tft.printf("New : %6.2f t/cm", newTpcm);
     tft.setTextColor(0x07FF, ST77XX_BLACK);
-    tft.setCursor(16, 72); tft.printf("Speed : %.1f cm/s", measuredCmPs);
-    tft.setTextColor(ST77XX_GREEN, ST77XX_BLACK);
-    tft.setCursor(16, 86); tft.print("30.0 cm SAVED");
-    uiDrawBottomBar("[A/B] Back", "CHECK");
+    tft.setCursor(14, 60); tft.printf("90cm: %ld ticks", ticks90);
+    tft.setTextColor(ok ? ST77XX_GREEN : ST77XX_RED, ST77XX_BLACK);
+    tft.setCursor(14, 78);
+    tft.print(ok ? "Turn PID: Unchanged" : "NVS Write Failed!");
+    uiDrawBottomBar("[A/B] OK", ok ? "FLASHED" : "RETRY");
 
+    if (ok) {
+        maxBeep(120);
+    } else {
+        maxBeep(80);
+        delay(60);
+        maxBeep(80);
+    }
     while (pollButtonAction() == BTN_NONE) { delay(20); }
 }
 
-static void screenTuneDistMm() {
-    uiDrawTopBar("TUNE DIST", "MM", UI_COLOR_TOP_BLUE);
-    tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
-    tft.drawRoundRect(10, 28, 140, 66, 6, 0x07FF);
-    uiDrawBottomBar("[A]-1mm [B]+1mm", "[A+B] Save");
+static void screenEditTicksPerCm() {
+    normalizeTicksPerCmFromLegacyTune();
+    float oldTpcm = ticksPerCm;
 
-    int lastMm = -999;
+    uiDrawTopBar("TUNE TICKS/CM", "FLOAT", UI_COLOR_TOP_BLUE);
+    tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
+    tft.drawRoundRect(8, 23, 144, 81, 5, 0x07FF);
+    tft.setTextSize(1);
+    tft.setTextColor(0x07FF, ST77XX_BLACK);
+    tft.setCursor(28, 28); tft.print("[-]Short  [+]Long");
+    tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+    tft.setCursor(16, 86); tft.print("Hold A/B: Fast step");
+    uiDrawBottomBar("[A]- [B]+", "[A+B]Flash");
+
+    int minH = (int)roundf(TICKS_PER_CM_MIN * 100.0f);
+    int maxH = (int)roundf(TICKS_PER_CM_MAX * 100.0f);
+    int tpcmHundredths = constrain((int)roundf(ticksPerCm * 100.0f), minH, maxH);
+    int lastDrawn = -1;
+    int lastDir   = BTN_NONE;
+    int holdCount = 0;
 
     while (true) {
-        if (distTuneMm != lastMm) {
-            lastMm = distTuneMm;
-            float effRate = max(1.0f, ticksPerCm) * ((300.0f + (float)distTuneMm) / 300.0f);
+        if (tpcmHundredths != lastDrawn) {
+            lastDrawn = tpcmHundredths;
+            float val = (float)tpcmHundredths * 0.01f;
+            long ticks90 = (long)llround((double)CAL_TEST_DISTANCE_CM * (double)val);
+
+            tft.fillRect(14, 44, 132, 20, ST77XX_BLACK);
             tft.setTextSize(2);
             tft.setTextColor(ST77XX_GREEN, ST77XX_BLACK);
-            tft.setCursor(24, 38);
-            tft.printf("%+4d mm ", distTuneMm);
+            tft.setCursor(44, 46);
+            tft.printf("%6.2f", val);
+
+            tft.fillRect(14, 68, 132, 12, ST77XX_BLACK);
             tft.setTextSize(1);
             tft.setTextColor(0xFFE0, ST77XX_BLACK);
-            tft.setCursor(24, 68);
-            tft.printf("Eff: %5.2f t/cm", effRate);
+            tft.setCursor(16, 70);
+            tft.printf("90cm = %6ld ticks", ticks90);
         }
 
         int act = pollButtonAction(true);
-        if (act == BTN_A) {
-            distTuneMm = constrain(distTuneMm - 1, -150, 150);
-        } else if (act == BTN_B) {
-            distTuneMm = constrain(distTuneMm + 1, -150, 150);
+        if (act == BTN_A || act == BTN_B) {
+            if (act == lastDir) holdCount++;
+            else {
+                lastDir   = act;
+                holdCount = 0;
+            }
+            int step = (holdCount >= 22) ? 500 : ((holdCount >= 12) ? 100 : ((holdCount >= 5) ? 10 : 1));
+            tpcmHundredths = constrain(tpcmHundredths + ((act == BTN_B) ? step : -step), minH, maxH);
         } else if (act == BTN_AB) {
-            configSave();
-            maxBeep(100);
+            ticksPerCm = (float)tpcmHundredths * 0.01f;
+            distTuneMm = 0;
+            bool ok = configSaveEncoderCalibration();
+            showFlashSaveResult(ok, oldTpcm, ticksPerCm);
             return;
+        } else {
+            lastDir   = BTN_NONE;
+            holdCount = 0;
         }
         delay(15);
     }
 }
 
-static void screenTuneMotorTrim() {
-    uiDrawTopBar("MOTOR TRIM", "TRIM", UI_COLOR_TOP_BLUE);
+static void screenTest90cmRun() {
+    normalizeTicksPerCmFromLegacyTune();
+    int testSpeed = constrain(max_speed_enc_turn, 15, 100);
+
+    while (true) {
+        // นับถอยหลัง 3 วินาที เพื่อให้วางหุ่นบนจุดเริ่มต้นและปล่อยมือได้ทัน
+        uiDrawTopBar("TEST 90 CM", "WAIT", UI_COLOR_TOP_ORANGE);
+        tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
+        tft.drawRoundRect(10, 24, 140, 78, 6, 0xFFE0);
+        tft.setTextSize(1);
+        tft.setTextColor(0x07FF, ST77XX_BLACK);
+        tft.setCursor(20, 30);
+        tft.print("Place at 0 cm!(90cm)");
+        tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+        tft.setCursor(20, 88);
+        tft.printf("Spd:%d R:%.2f", testSpeed, ticksPerCm);
+        uiDrawBottomBar("[A/B] Cancel", "3s COUNT");
+
+        for (int sec = 3; sec >= 1; sec--) {
+            tft.setTextSize(4);
+            tft.setTextColor(0xFFE0, ST77XX_BLACK);
+            tft.setCursor(68, 48);
+            tft.printf("%d", sec);
+            maxBeep(60);
+
+            unsigned long t0 = millis();
+            while (millis() - t0 < 940UL) {
+                if (readSwitch(A) || readSwitch(B)) {
+                    maxBeep(25);
+                    waitBothReleased();
+                    return;
+                }
+                delay(15);
+            }
+        }
+
+        uiDrawTopBar("TEST 90 CM", "RUN", UI_COLOR_TOP_ORANGE);
+        tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
+        tft.drawRoundRect(10, 26, 140, 74, 5, 0xFFE0);
+        tft.setTextSize(1);
+        tft.setTextColor(0x07FF, ST77XX_BLACK);
+        tft.setCursor(20, 44);
+        tft.print("Running 90.0 cm...");
+        tft.setTextColor(0xFFE0, ST77XX_BLACK);
+        tft.setCursor(20, 64);
+        tft.printf("Speed: %d (Max)", testSpeed);
+        uiDrawBottomBar("RUNNING", "90.0 CM");
+
+        maxBeep(120);
+        driveStop();
+        resetTargetYaw();
+        resetEncoder(); // รีเซ็ต Ticks = 0 ก่อนออกตัวทดสอบทุกครั้ง
+        long targetTicks = encoderCentimetersToTicks(CAL_TEST_DISTANCE_CM, testSpeed);
+        unsigned long tRunStart = millis();
+        FC(testSpeed, CAL_TEST_DISTANCE_CM, true); // วิ่งตรงจริงที่ความเร็วสูงสุด 90 ซม. แล้วตัดมอเตอร์ทันที (ไม่เลี้ยวต่อ)
+        driveStop();
+        unsigned long runElapsedMs = millis() - tRunStart;
+        long stopTicks = readEncoderDistance();
+        maxBeep(120);
+
+        long c[4];
+        readAllEncoders(c);
+        long finalTicks = readEncoderDistance();
+        float measuredCmPs = (CAL_TEST_DISTANCE_CM * 1000.0f) / (float)max(100UL, runElapsedMs);
+        if (runElapsedMs >= 150UL && runElapsedMs <= 15000UL) {
+            float cmPsAt45 = measuredCmPs * (45.0f / (float)max(15, testSpeed));
+            calRun30cmMs = constrain((int)roundf(30000.0f / max(5.0f, cmPsAt45)), 150, 15000);
+            configSaveEncoderCalibration();
+        }
+
+        Serial.printf("[CAL90] target=%.1fcm spd=%d targetTicks=%ld stopTicks=%ld finalTicks=%ld tpcm=%.2f time=%lu ms speed=%.1f cm/s M=[%ld,%ld,%ld,%ld]\n",
+                      CAL_TEST_DISTANCE_CM, testSpeed, targetTicks, stopTicks, finalTicks,
+                      ticksPerCm, runElapsedMs, measuredCmPs, c[0], c[1], c[2], c[3]);
+
+        uiDrawTopBar("RESULT 90CM", "DONE", UI_COLOR_TOP_GREEN);
+        tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
+        tft.drawRoundRect(6, 22, 148, 84, 5, ST77XX_GREEN);
+        tft.setTextSize(1);
+        tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+        tft.setCursor(14, 27); tft.printf("Ticks : %ld", finalTicks);
+        tft.setCursor(14, 42); tft.printf("Target: %ld", targetTicks);
+        tft.setCursor(14, 57); tft.printf("Rate  : %.2f t/cm", ticksPerCm);
+        tft.setCursor(14, 72); tft.printf("Time  : %lu ms", runElapsedMs);
+        tft.setTextColor(0x07FF, ST77XX_BLACK);
+        tft.setCursor(14, 87); tft.printf("Speed : %.1f cm/s", measuredCmPs);
+        uiDrawBottomBar("[A]Back [B]Run", "[A+B]Tune");
+
+        while (true) {
+            int act = pollButtonAction();
+            if (act == BTN_A) return;
+            if (act == BTN_B) break; // กด B เพื่อทดสอบวิ่ง 90 ซม. ซ้ำทันที
+            if (act == BTN_AB) {
+                screenEditTicksPerCm();
+                return;
+            }
+            delay(20);
+        }
+    }
+}
+
+static void screenEditMotorTrimSide(bool isLeft) {
+    int initVal = isLeft ? getLeftMotorTrim() : getRightMotorTrim();
+    int val     = initVal;
+
+    uiDrawTopBar(isLeft ? "TRIM LEFT" : "TRIM RIGHT", "0..-25", UI_COLOR_TOP_BLUE);
     tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
-    tft.drawRoundRect(14, 28, 132, 66, 6, 0x07FF);
+    tft.drawRoundRect(10, 24, 140, 78, 6, 0x07FF);
     uiDrawBottomBar("[A]-1  [B]+1", "[A+B] Save");
 
     int lastVal = -999;
     while (true) {
-        if (motorTrim != lastVal) {
-            lastVal = motorTrim;
+        if (val != lastVal) {
+            lastVal = val;
 
+            tft.fillRect(16, 30, 128, 66, ST77XX_BLACK);
             tft.setTextSize(3);
             tft.setTextColor(ST77XX_GREEN, ST77XX_BLACK);
-            tft.setCursor(46, 38);
-            tft.printf("%+3d", motorTrim);
+            tft.setCursor(46, 34);
+            tft.printf("%3d", val);
 
-            tft.fillRect(22, 70, 116, 14, ST77XX_BLACK);
             tft.setTextSize(1);
-            if (motorTrim < 0) {
+            if (val < 0) {
                 tft.setTextColor(0xFFE0, ST77XX_BLACK);
-                tft.setCursor(32, 73);
-                tft.print("LEFT SPEED DOWN");
-            } else if (motorTrim > 0) {
-                tft.setTextColor(0x07FF, ST77XX_BLACK);
-                tft.setCursor(32, 73);
-                tft.print("RIGHT SPEED UP");
+                tft.setCursor(28, 68);
+                tft.printf(isLeft ? "LEFT SPEED  %d" : "RIGHT SPEED %d", val);
             } else {
                 tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
-                tft.setCursor(48, 73);
-                tft.print("CENTER (0)");
+                tft.setCursor(36, 68);
+                tft.print(isLeft ? "LEFT FULL (0)" : "RIGHT FULL (0)");
+            }
+
+            int otherCut = isLeft ? getRightMotorTrim() : getLeftMotorTrim();
+            if (val < 0 && otherCut < 0) {
+                tft.setTextColor(0x07FF, ST77XX_BLACK);
+                tft.setCursor(22, 84);
+                tft.print(isLeft ? "(Clears Right trim)" : "(Clears Left trim)");
+            } else if (val == 0 && otherCut < 0) {
+                tft.setTextColor(0x07FF, ST77XX_BLACK);
+                tft.setCursor(28, 84);
+                tft.printf(isLeft ? "(Right now: %d)" : "(Left now: %d)", otherCut);
             }
         }
 
         int act = pollButtonAction(true);
-        if (act == BTN_A)      motorTrim = constrain(motorTrim - 1, -25, 25);
-        else if (act == BTN_B) motorTrim = constrain(motorTrim + 1, -25, 25);
+        if (act == BTN_A)      val = constrain(val - 1, -25, 0);
+        else if (act == BTN_B) val = constrain(val + 1, -25, 0);
         else if (act == BTN_AB) {
-            configSave();
+            if (val < 0) {
+                motorTrim = isLeft ? val : -val;
+            } else if (initVal < 0) {
+                motorTrim = 0;
+            }
+            configSaveMotorTrim();
             maxBeep(100);
             return;
         }
@@ -933,16 +1002,22 @@ static void screenTuneMotorTrim() {
     }
 }
 
-static void drawTuneMenuCards(int selected) {
-    uiDrawTopBar("3. TUNE MENU", "DIST", UI_COLOR_TOP_BLUE);
+static void drawMotorTrimMenuCards(int selected) {
+    uiDrawTopBar("3. MOTOR TRIM", "L/R", UI_COLOR_TOP_BLUE);
     tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
 
-    char sub1[20], sub2[16];
-    snprintf(sub1, sizeof(sub1), "%+dmm (%.1ft/c)", distTuneMm, ticksPerCm);
-    snprintf(sub2, sizeof(sub2), "Trim: %+d", motorTrim);
+    int leftCut  = getLeftMotorTrim();
+    int rightCut = getRightMotorTrim();
 
-    const char* titles[2] = { "1. TUNE DIST (mm)", "2. MOTOR TRIM" };
-    const char* subs[2]   = { sub1, sub2 };
+    char subL[24], subR[24];
+    if (leftCut < 0) snprintf(subL, sizeof(subL), "Left Speed: %d", leftCut);
+    else             snprintf(subL, sizeof(subL), "Left Speed: 0 (Full)");
+
+    if (rightCut < 0) snprintf(subR, sizeof(subR), "Right Speed: %d", rightCut);
+    else              snprintf(subR, sizeof(subR), "Right Speed: 0 (Full)");
+
+    const char* titles[2] = { "1. TRIM LEFT", "2. TRIM RIGHT" };
+    const char* subs[2]   = { subL, subR };
 
     for (int i = 0; i < 2; i++) {
         int y = 24 + i * 31;
@@ -970,7 +1045,7 @@ static void drawTuneMenuCards(int selected) {
     uiDrawBottomBar("[A/B] Move", "[A+B] OK");
 }
 
-static void screenTuneTicksPerCm() {
+static void screenMotorTrimMenu() {
     int idx = 0;
     int lastIdx = -1;
     bool needRedraw = true;
@@ -979,15 +1054,15 @@ static void screenTuneTicksPerCm() {
         if (idx != lastIdx || needRedraw) {
             lastIdx = idx;
             needRedraw = false;
-            drawTuneMenuCards(idx);
+            drawMotorTrimMenuCards(idx);
         }
 
         int act = pollButtonAction();
         if (act == BTN_A)      idx = (idx - 1 + 3) % 3;
         else if (act == BTN_B) idx = (idx + 1) % 3;
         else if (act == BTN_AB) {
-            if (idx == 0)      screenTuneDistMm();
-            else if (idx == 1) screenTuneMotorTrim();
+            if (idx == 0)      screenEditMotorTrimSide(true);
+            else if (idx == 1) screenEditMotorTrimSide(false);
             else               return;
             needRedraw = true;
         }
@@ -996,13 +1071,28 @@ static void screenTuneTicksPerCm() {
 }
 
 static void drawDistMenuCards(int selected) {
-    uiDrawTopBar("5. CAL 30CM", "DIST", UI_COLOR_TOP_BLUE);
+    uiDrawTopBar("5. CAL 90CM", "DIST", UI_COLOR_TOP_BLUE);
     tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
 
-    char tuneSub[16];
-    snprintf(tuneSub, sizeof(tuneSub), "%.1f t/cm", ticksPerCm);
-    const char* titles[3] = { "1. PUSH 30CM", "2. TEST 30CM", "3. TUNE RATE" };
-    const char* subs[3]   = { "Roll & Cap",   "Run & Check",  tuneSub };
+    int testSpeed = constrain(max_speed_enc_turn, 15, 100);
+    float effTpcm = ticksPerCm;
+    if (distTuneMm != 0) {
+        float tuneScale = constrain((300.0f + (float)distTuneMm) / 300.0f, 0.50f, 1.50f);
+        effTpcm = ticksPerCm * tuneScale;
+    }
+
+    int leftCut  = getLeftMotorTrim();
+    int rightCut = getRightMotorTrim();
+
+    char spdSub[16], tuneSub[16], trimSub[16];
+    snprintf(spdSub, sizeof(spdSub), "Spd %d", testSpeed);
+    snprintf(tuneSub, sizeof(tuneSub), "%.2f t/c", effTpcm);
+    if (leftCut < 0)       snprintf(trimSub, sizeof(trimSub), "L:%d", leftCut);
+    else if (rightCut < 0) snprintf(trimSub, sizeof(trimSub), "R:%d", rightCut);
+    else                   snprintf(trimSub, sizeof(trimSub), "0 (Off)");
+
+    const char* titles[3] = { "1. TEST 90CM", "2. TUNE RATE", "3. MOTOR TRIM" };
+    const char* subs[3]   = { spdSub,         tuneSub,        trimSub };
 
     for (int i = 0; i < 3; i++) {
         int y = 22 + i * 22;
@@ -1034,7 +1124,7 @@ static void drawDistMenuCards(int selected) {
     uiDrawBottomBar("[A/B] Move", "[A+B] OK");
 }
 
-static void screenDistance30cm() {
+static void screenCalibrate90cm() {
     int idx = 0;
     int lastIdx = -1;
     bool needRedraw = true;
@@ -1050,9 +1140,9 @@ static void screenDistance30cm() {
         if (act == BTN_A)      idx = (idx - 1 + 4) % 4;
         else if (act == BTN_B) idx = (idx + 1) % 4;
         else if (act == BTN_AB) {
-            if (idx == 0)      screenPush30cm();
-            else if (idx == 1) screenTest30cmRun();
-            else if (idx == 2) screenTuneTicksPerCm();
+            if (idx == 0)      screenTest90cmRun();
+            else if (idx == 1) screenEditTicksPerCm();
+            else if (idx == 2) screenMotorTrimMenu();
             else               return;
             needRedraw = true;
         }
@@ -1356,7 +1446,7 @@ static void drawAssemblyGrid(int selected) {
         "Calibrate Line Sensors",
         "Front/Back Servo Angle",
         "Read & Reset IMU Yaw",
-        "Encoder & Cal 30cm",
+        "Encoder & Cal 90cm",
         "AutoTune, Serial & Cmd",
         "Go to Ready-to-Run"
     };

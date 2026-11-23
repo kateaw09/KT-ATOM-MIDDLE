@@ -5,5 +5,56 @@
 extern int speed;
 
 void runMode1() {
- 
+    Box1();
+    Box2();
+    Box3();
+    Box4();
+    EndMission();
+}
+
+void Box1() {
+    FC(100, 25.0f, 'R');
+    FC(100, 61.0f, 'r');
+    BC(100, 20.0f);
+    DropB(50);
+}
+
+void Box2() {
+    FC(100, 55.0f, 'R');
+    FC(100, 25.0f, 'L');
+    FC(100, 30.0f, 'R');
+    FC(100, 70.0f, 'R');
+    FC(100, 30.0f);
+    delay(200);
+    BC(100, 30.0f, 'R');
+    BC(50, 120.0f, 'R');
+    BC(100, 25.0f, 'l');
+    FC(50, 90.0f);
+    SetF(35, 10.0f, 'L');
+    FC(100, 70.0f, 'R');
+    FC(80, 75.0f);
+    DropF(50);
+}
+
+void Box3() {
+    BC(100, 160.0f);
+    DropB(50);
+}
+
+void Box4() {
+    FC(100, 60.0f, 'R');
+    FC(100, 60.0f, 'r');
+    FC(50, 80.0f);
+    SetF(35, 10.0f, 'L');
+    FC(100, 30.0f, 'L');
+    FC(100, 150.0f, 'L');
+    FC(100, 25.0f, 'R');
+    FC(100, 60.0f, 'R');
+    FC(80, 25.0f, 'R');
+    DropF(50);
+}
+
+void EndMission() {
+    BC(100, 25.0f, 'L');
+    BC(100, 70.0f);
 }

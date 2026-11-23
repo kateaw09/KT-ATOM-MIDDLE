@@ -407,8 +407,8 @@ static void turnSwingCore(float relativeDeg, float threshold, int maxSpeedOverri
             int steerCap = max(baseFwd, (int)roundf((float)rollBase * 0.65f));
             int steer    = constrain((int)roundf(steerF), -steerCap, steerCap);
 
-            int trimL = (motorTrim < 0) ? motorTrim : 0;
-            int trimR = (motorTrim > 0) ? motorTrim : 0;
+            int trimL = getLeftMotorTrim();
+            int trimR = getRightMotorTrim();
             int cmdL = 0, cmdR = 0;
             if (!isBack) {
                 cmdL = constrain(baseFwd + steer + trimL, 0, 100);
@@ -457,8 +457,8 @@ static void turnSwingCore(float relativeDeg, float threshold, int maxSpeedOverri
             }
             int pdValue = constrain((int)roundf(pTerm - dBrake), floorSpd, rampMaxSpd);
 
-            int trimL = (motorTrim < 0) ? motorTrim : 0;
-            int trimR = (motorTrim > 0) ? motorTrim : 0;
+            int trimL = getLeftMotorTrim();
+            int trimR = getRightMotorTrim();
             int outerFloor = max(20, floorSpd - 4);
             int outerL = constrain(pdValue + trimL, outerFloor, 100);
             int outerR = constrain(pdValue + trimR, outerFloor, 100);

@@ -207,7 +207,7 @@
 </head>
 <body>
   <h1>PT-BOT Atom VX — Interactive UI Simulator</h1>
-  <div class="sub">จำลองหน้าจอ TFT 160×128 พร้อมไอคอน + ใส่ค่าทดลอง IMU / Sensor / Encoder / 30cm ได้จริง</div>
+  <div class="sub">จำลองหน้าจอ TFT 160×128 พร้อมไอคอน + ใส่ค่าทดลอง IMU / Sensor / Encoder / 90cm ได้จริง</div>
 
   <div class="tabs">
     <button class="tab active" onclick="showScreen('ready')">Ready-to-Run</button>
@@ -219,7 +219,7 @@
     <button class="tab" onclick="showScreen('servo')">2.1 Edit Servo</button>
     <button class="tab" onclick="showScreen('imu')">3. IMU</button>
     <button class="tab" onclick="showScreen('encoder')">4. Encoder</button>
-    <button class="tab" onclick="showScreen('dist30')">4.1 Cal 30cm</button>
+    <button class="tab" onclick="showScreen('dist30')">4.1 Cal 90cm</button>
     <button class="tab" onclick="showScreen('setup')">5. Run Setup</button>
   </div>
 
@@ -287,7 +287,7 @@
       </div>
 
       <div class="sim-group">
-        <strong>ระยะ Encoder &amp; Calibration (30 cm)</strong>
+        <strong>ระยะ Encoder &amp; Calibration (90 cm)</strong>
         <div class="sim-row">
           <span>Ticks/cm:</span>
           <input type="range" id="inTpcm" min="5" max="40" step="0.1" value="15.0" oninput="render()">
@@ -485,7 +485,7 @@
         'Calibrate Line Sensors',
         'Front/Back Servo Angle',
         'Read & Reset IMU Yaw',
-        'Encoder & Cal 30cm',
+        'Encoder & Cal 90cm',
         'Show Cmd & Beep (Flash)',
         'Go to Ready-to-Run'
       ];
@@ -595,15 +595,15 @@
             <span style="color:#00ff00">AVG:</span><span style="color:#00ff00;font-weight:bold">${t}t | ${estCm}cm</span>
           </div>
         </div>
-        <div class="bottom-bar"><span class="hint-left">[A]0 [B]Back</span><span class="hint-right">[A+B]Cal30</span></div>`;
+        <div class="bottom-bar"><span class="hint-left">[A]0 [B]Back</span><span class="hint-right">[A+B]Cal90</span></div>`;
     } else if (currentScreen === 'dist30') {
       const dItems = [
-        ['1. PUSH 30CM', 'Roll & Cap'],
-        ['2. TEST 30CM', 'Run & Check'],
-        ['3. TUNE RATE', `${tpcm.toFixed(1)} t/cm`]
+        ['1. TEST 90CM', 'Spd 100'],
+        ['2. TUNE RATE', `${tpcm.toFixed(2)} t/c`],
+        ['3. MOTOR TRIM', 'L:-2']
       ];
       el.innerHTML = `
-        <div class="top-bar" style="background:#0046aa"><div class="top-left"><span class="top-dot"></span><span>5. CAL 30CM</span></div><span class="badge">${estCm}cm</span></div>
+        <div class="top-bar" style="background:#0046aa"><div class="top-left"><span class="top-dot"></span><span>5. CAL 90CM</span></div><span class="badge">${estCm}cm</span></div>
         <div class="content" style="gap:8px; justify-content:flex-start; padding-top:10px">
           ${dItems.map(([t, s], i) => `
             <div style="padding:10px 14px; border-radius:8px; border:2px solid ${i===distIdx?'#ffe600':'#475569'}; background:${i===distIdx?'#00ffff':'#0b1220'}; color:${i===distIdx?'#000':'#fff'}; display:flex; justify-content:space-between; font-weight:bold; font-size:15px">

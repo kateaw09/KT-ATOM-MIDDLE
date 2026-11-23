@@ -1,11 +1,11 @@
 'use strict';
 
 import { evalExpression, resolveDirValue } from '../blocks/expressionAst.js';
+import { MISSION_SECTIONS } from '../blocks/definitions.js';
+import { render2DFieldGrid, renderIsometricGrid } from './fieldRenderer.js';
+import { getCellOccupancyMap, getElevationAtCm, resolveTileSemantics } from './fieldTiles.js';
 
-export function encoderCountsPerRevolution(speed) {
-  const s = Math.abs(Number(speed) || 0);
-  if (s >= 70) return 1000.0;
-  if (s >= 50) return 1200.0;
+export function encoderCountsPerRevolution(_speed) {
   return 1300.0;
 }
 
@@ -35,6 +35,24 @@ function dirToAngle(dir) {
   return 0;
 }
 
+export function evalSegmentPose(seg, tRaw) {
+  const t = Math.max(0, Math.min(1, Number(tRaw) || 0));
+  const h = seg.fh + (seg.th - seg.fh) * t;
+  if (seg.arc) {
+    const rad = (h * Math.PI) / 180;
+    return {
+      x: seg.arc.cx - seg.arc.s * seg.arc.r * Math.cos(rad),
+      y: seg.arc.cy - seg.arc.s * seg.arc.r * Math.sin(rad),
+      h
+    };
+  }
+  return {
+    x: seg.fx + (seg.tx - seg.fx) * t,
+    y: seg.fy + (seg.ty - seg.fy) * t,
+    h
+  };
+}
+
 export function getGridConfig() {
   const cellCm = Math.max(5, Math.min(200, parseFloat(document.getElementById('simCellSizeCm')?.value) || 30));
   const cols = Math.max(2, Math.min(24, parseInt(document.getElementById('simGridCols')?.value, 10) || 7));
@@ -56,39 +74,65 @@ export function buildSimSegments(state) {
   const tuneScale = getCalTuneScale(cal);
   const trim = Number(cal.trim) || 0;
 
+  // Match Config.ino / Move.ino / SpinTurn.ino curved turn kinematics
+  const enableComp = state.config?.enableTurnDistComp !== false;
+  const innerRatio = Math.max(0, Math.min(0.85, Number(state.config?.turnInnerRatio) || 0));
+  const innerScale = innerRatio > 0.01 ? (1 + innerRatio) / (1 - innerRatio) : 1;
+  const baseTurnRadius = Math.max(2.5, Number(state.config?.turnExitRadiusCm) || 6.3);
+  const effTurnRadius = Math.min(22, baseTurnRadius * innerScale);
+  const turnFrontSpd = Number(state.config?.turnFrontMaxSpeed) || 80;
+  const turnBackSpd = Number(state.config?.turnBackMaxSpeed) || 80;
+  let turnExitCarryCm = 0;
+
   let x = (grid.startCol + 0.5) * grid.cellCm;
   let y = (grid.startRow + 0.5) * grid.cellCm;
   let h = grid.startHeading;
 
-  const blocks = state.missions[state.activeMissionFile]?.blocks || [];
+  const missionObj = state.missions[state.activeMissionFile];
+  const blocks = missionObj?.sections
+    ? MISSION_SECTIONS.flatMap((sec) => missionObj.sections[sec.id] || [])
+    : (missionObj?.blocks || []);
   const segments = [];
   let nominalCm = 0;
   let calibratedCm = 0;
   let totalTicks = 0;
   let totalMs = 0;
 
-  const pushMove = (blockIdx, distCm, speed, label, marker = null, applyEncoderCal = true) => {
-    const absCm = Math.abs(distCm);
-    const signedEffCm = applyEncoderCal ? distCm * tuneScale : distCm;
-    const ticks = applyEncoderCal ? encoderCentimetersToTicks(absCm, speed, cal) : 0;
+  const consumeCarryWorldCm = (rawCm, forward, entryCompWorldCm = 0) => {
+    const carry = enableComp ? turnExitCarryCm : 0;
+    turnExitCarryCm = 0;
+    const signedPrev = forward ? carry : -carry;
+    const adj = rawCm * tuneScale - signedPrev - entryCompWorldCm;
+    return Math.max(0, adj);
+  };
+
+  const pushMoveWorld = (blockIdx, signedWorldCm, speed, label, marker = null, applyEncoderCal = true, rawNominalAbsCm = null) => {
+    const absWorldCm = Math.abs(signedWorldCm);
+    const nomCm = rawNominalAbsCm !== null ? Math.abs(rawNominalAbsCm) : (applyEncoderCal ? absWorldCm / Math.max(0.01, tuneScale) : absWorldCm);
+    const ticks = applyEncoderCal ? encoderCentimetersToTicks(nomCm, speed, cal) : 0;
     const driftDeg = applyEncoderCal ? 0 : trim * 0.25;
     const rad = ((h + driftDeg) * Math.PI) / 180;
-    const nx = x + Math.sin(rad) * signedEffCm;
-    const ny = y - Math.cos(rad) * signedEffCm;
+    const nx = x + Math.sin(rad) * signedWorldCm;
+    const ny = y - Math.cos(rad) * signedWorldCm;
     const velCmPs = getCalibratedSpeedCmPerSec(speed, cal);
-    const dur = Math.max(100, (Math.abs(signedEffCm) / Math.max(1, velCmPs)) * 1000);
+    const dur = Math.max(100, (absWorldCm / Math.max(1, velCmPs)) * 1000);
 
-    nominalCm += absCm;
-    calibratedCm += Math.abs(signedEffCm);
+    nominalCm += nomCm;
+    calibratedCm += absWorldCm;
     totalTicks += ticks;
     totalMs += dur;
 
     segments.push({
       blockIdx, fx: x, fy: y, fh: h, tx: nx, ty: ny, th: h,
-      startMs: totalMs - dur, endMs: totalMs, speedCmPs: velCmPs, label, ticks, effCm: signedEffCm, dur, marker
+      startMs: totalMs - dur, endMs: totalMs, speedCmPs: velCmPs, label, ticks, effCm: signedWorldCm, dur, marker
     });
     x = nx;
     y = ny;
+  };
+
+  const pushMove = (blockIdx, distCm, speed, label, marker = null, applyEncoderCal = true) => {
+    const signedWorldCm = applyEncoderCal ? distCm * tuneScale : distCm;
+    pushMoveWorld(blockIdx, signedWorldCm, speed, label, marker, applyEncoderCal, Math.abs(distCm));
   };
 
   const pushTurn = (blockIdx, deg, label, isSwing = false) => {
@@ -103,106 +147,159 @@ export function buildSimSegments(state) {
     h = nh;
   };
 
+  const pushArcTurn = (blockIdx, deg, radiusCm, dirSign, speed, label, opts = {}) => {
+    if (Math.abs(deg) < 0.1 || radiusCm <= 0.05) {
+      pushTurn(blockIdx, deg, label, true);
+      return;
+    }
+    const s = dirSign * Math.sign(deg);
+    const h0Rad = (h * Math.PI) / 180;
+    const nh = h + deg;
+    const h1Rad = (nh * Math.PI) / 180;
+    const cx = x + s * radiusCm * Math.cos(h0Rad);
+    const cy = y + s * radiusCm * Math.sin(h0Rad);
+    const nx = cx - s * radiusCm * Math.cos(h1Rad);
+    const ny = cy - s * radiusCm * Math.sin(h1Rad);
+    const arcLenCm = Math.abs(deg) * (Math.PI / 180) * radiusCm;
+    const velCmPs = getCalibratedSpeedCmPerSec(speed, cal);
+    const dur = Math.max(160, (arcLenCm / Math.max(12, velCmPs)) * 1000);
+    const ticks = Number.isFinite(opts.ticks) ? opts.ticks : encoderCentimetersToTicks(arcLenCm, speed, cal);
+    const nomArc = Number.isFinite(opts.rawNominalCm) ? opts.rawNominalCm : arcLenCm;
+
+    nominalCm += nomArc;
+    calibratedCm += arcLenCm;
+    totalTicks += ticks;
+    totalMs += dur;
+
+    segments.push({
+      blockIdx,
+      fx: x,
+      fy: y,
+      fh: h,
+      tx: nx,
+      ty: ny,
+      th: nh,
+      arc: { cx, cy, r: radiusCm, s, dirSign },
+      startMs: totalMs - dur,
+      endMs: totalMs,
+      speedCmPs: velCmPs,
+      label,
+      ticks,
+      effCm: dirSign * arcLenCm,
+      dur,
+      marker: 'turn'
+    });
+    x = nx;
+    y = ny;
+    h = nh;
+  };
+
   blocks.forEach((b, idx) => {
     const p = b.params || {};
     const spd = evalExpression(p.speed, vars, 60);
     const cm = evalExpression(p.cm, vars, 30);
     switch (b.type) {
-      case 'FC_SIMPLE':
-        pushMove(idx, cm, spd, `FC ${cm.toFixed(0)}cm`);
-        break;
-      case 'BC_SIMPLE':
-        pushMove(idx, -cm, spd, `BC ${cm.toFixed(0)}cm`);
-        break;
-      case 'FC_DIR': {
-        const d = resolveDirValue(p.dir, vars);
-        const ang = (d === 'L' || d === 'l') ? -90 : 90;
-        const isSwing = (d === 'L' || d === 'R');
-        pushMove(idx, cm, spd, `FC ${cm.toFixed(0)}cm`);
-        pushTurn(idx, ang, isSwing ? `Swing '${d}'` : `Spin '${d}'`, isSwing);
+      case 'FC_SIMPLE': {
+        const straightWorld = enableComp ? consumeCarryWorldCm(cm, true, 0) : cm * tuneScale;
+        turnExitCarryCm = 0;
+        if (straightWorld > 0.05) pushMoveWorld(idx, straightWorld, spd, `FC ${cm.toFixed(0)}cm`, null, true, cm);
         break;
       }
-      case 'BC_DIR': {
-        const d = resolveDirValue(p.dir, vars);
-        const ang = (d === 'L' || d === 'l') ? -90 : 90;
-        const isSwing = (d === 'L' || d === 'R');
-        pushMove(idx, -cm, spd, `BC ${cm.toFixed(0)}cm`);
-        pushTurn(idx, ang, isSwing ? `Swing '${d}'` : `Spin '${d}'`, isSwing);
+      case 'BC_SIMPLE': {
+        const straightWorld = enableComp ? consumeCarryWorldCm(cm, false, 0) : cm * tuneScale;
+        turnExitCarryCm = 0;
+        if (straightWorld > 0.05) pushMoveWorld(idx, -straightWorld, spd, `BC ${cm.toFixed(0)}cm`, null, true, cm);
         break;
       }
-      case 'FC4': {
-        const d = resolveDirValue(p.dir, vars);
-        const isSwing = (d === 'L' || d === 'R');
-        pushMove(idx, cm, spd, `FC4 ${cm.toFixed(0)}cm`);
-        pushTurn(idx, (d === 'L' || d === 'l') ? -45 : 45, isSwing ? `45° Swing '${d}'` : `45° Spin '${d}'`, isSwing);
-        break;
-      }
+      case 'FC_DIR':
+      case 'BC_DIR':
+      case 'FC4':
       case 'BC4': {
+        const forward = b.type === 'FC_DIR' || b.type === 'FC4';
+        const is45 = b.type === 'FC4' || b.type === 'BC4';
         const d = resolveDirValue(p.dir, vars);
+        const mag = is45 ? 45 : 90;
+        const ang = (d === 'L' || d === 'l') ? -mag : mag;
         const isSwing = (d === 'L' || d === 'R');
-        pushMove(idx, -cm, spd, `BC4 ${cm.toFixed(0)}cm`);
-        pushTurn(idx, (d === 'L' || d === 'l') ? -45 : 45, isSwing ? `45° Swing '${d}'` : `45° Spin '${d}'`, isSwing);
+        const prefix = b.type === 'FC4' ? 'FC4' : b.type === 'BC4' ? 'BC4' : (forward ? 'FC' : 'BC');
+
+        if (isSwing) {
+          const tanHalf = Math.tan((Math.min(135, Math.max(5, Math.abs(ang))) * 0.5 * Math.PI) / 180);
+          const prevCarrySigned = enableComp ? (forward ? turnExitCarryCm : -turnExitCarryCm) : 0;
+          const availWorld = Math.max(0, cm * tuneScale - prevCarrySigned);
+          const arcR = (enableComp && cm > 0.1)
+            ? Math.min(effTurnRadius, Math.max(2.0, (availWorld * 0.85) / Math.max(0.2, tanHalf)))
+            : effTurnRadius;
+          const entryComp = enableComp ? Math.min(availWorld, arcR * tanHalf) : 0;
+          const straightWorld = enableComp ? consumeCarryWorldCm(cm, forward, entryComp) : cm * tuneScale;
+          if (straightWorld > 0.05) {
+            pushMoveWorld(idx, forward ? straightWorld : -straightWorld, spd, `${prefix} ${cm.toFixed(0)}cm`, null, true, straightWorld / Math.max(0.01, tuneScale));
+          }
+          const turnLabel = is45 ? `45° Turn '${d}'` : `Turn '${d}'`;
+          pushArcTurn(idx, ang, arcR, forward ? 1 : -1, spd || (forward ? turnFrontSpd : turnBackSpd), turnLabel);
+          turnExitCarryCm = enableComp ? (forward ? arcR * tanHalf : -arcR * tanHalf) : 0;
+        } else {
+          const straightWorld = enableComp ? consumeCarryWorldCm(cm, forward, 0) : cm * tuneScale;
+          turnExitCarryCm = 0;
+          if (straightWorld > 0.05) {
+            pushMoveWorld(idx, forward ? straightWorld : -straightWorld, spd, `${prefix} ${cm.toFixed(0)}cm`, null, true, straightWorld / Math.max(0.01, tuneScale));
+          }
+          pushTurn(idx, ang, is45 ? `45° Spin '${d}'` : `Spin '${d}'`, false);
+        }
         break;
       }
-      case 'SPIN':
-      case 'TURN_F':
-      case 'TURN_B': {
+      case 'SPIN': {
+        turnExitCarryCm = 0;
         const deg = evalExpression(p.deg, vars, 90);
-        pushTurn(idx, deg, `${b.type} ${deg}°`);
+        pushTurn(idx, deg, `SPIN ${deg}°`, false);
+        break;
+      }
+      case 'TURN_F': {
+        turnExitCarryCm = 0;
+        const deg = evalExpression(p.deg, vars, 90);
+        pushArcTurn(idx, deg, effTurnRadius, 1, turnFrontSpd, `TurnF ${deg}°`);
+        break;
+      }
+      case 'TURN_B': {
+        turnExitCarryCm = 0;
+        const deg = evalExpression(p.deg, vars, 90);
+        pushArcTurn(idx, deg, effTurnRadius, -1, turnBackSpd, `TurnB ${deg}°`);
         break;
       }
       case 'TTF90':
       case 'TTF45': {
+        turnExitCarryCm = 0;
         const sL = evalExpression(p.spdL, vars, 80);
         const sR = evalExpression(p.spdR, vars, 25);
         const ang = b.type === 'TTF90' ? 90 : 45;
         const delta = sL < sR ? -ang : ang;
-        const nh = h + delta;
-        const chord = cm * 0.72 * tuneScale;
-        const midRad = ((h + delta * 0.5) * Math.PI) / 180;
-        const nx = x + Math.sin(midRad) * chord;
-        const ny = y - Math.cos(midRad) * chord;
         const spdMax = Math.max(Math.abs(sL), Math.abs(sR));
-        const velCmPs = getCalibratedSpeedCmPerSec(spdMax, cal);
-        const dur = Math.max(220, ((cm * tuneScale) / velCmPs) * 1000);
+        const arcR = Math.max(2.5, (cm * tuneScale) / ((Math.abs(delta) * Math.PI) / 180));
         const ticks = encoderCentimetersToTicks(cm, spdMax, cal);
-        totalTicks += ticks;
-        nominalCm += cm;
-        calibratedCm += cm * tuneScale;
-        totalMs += dur;
-        segments.push({ blockIdx: idx, fx: x, fy: y, fh: h, tx: nx, ty: ny, th: nh, startMs: totalMs - dur, endMs: totalMs, speedCmPs: velCmPs, label: b.type, ticks, effCm: chord, dur, marker: null });
-        x = nx; y = ny; h = nh;
+        pushArcTurn(idx, delta, arcR, 1, spdMax, b.type, { rawNominalCm: cm, ticks });
         break;
       }
       case 'TTB90':
       case 'TTB45': {
+        turnExitCarryCm = 0;
         const sL = evalExpression(p.spdL, vars, 25);
         const sR = evalExpression(p.spdR, vars, 80);
         const ang = b.type === 'TTB90' ? 90 : 45;
         const delta = sL < sR ? ang : -ang;
-        const nh = h + delta;
-        const chord = cm * 0.72 * tuneScale;
-        const midRad = ((h + delta * 0.5) * Math.PI) / 180;
-        const nx = x - Math.sin(midRad) * chord;
-        const ny = y + Math.cos(midRad) * chord;
         const spdMax = Math.max(Math.abs(sL), Math.abs(sR));
-        const velCmPs = getCalibratedSpeedCmPerSec(spdMax, cal);
-        const dur = Math.max(220, ((cm * tuneScale) / velCmPs) * 1000);
+        const arcR = Math.max(2.5, (cm * tuneScale) / ((Math.abs(delta) * Math.PI) / 180));
         const ticks = encoderCentimetersToTicks(cm, spdMax, cal);
-        totalTicks += ticks;
-        nominalCm += cm;
-        calibratedCm += cm * tuneScale;
-        totalMs += dur;
-        segments.push({ blockIdx: idx, fx: x, fy: y, fh: h, tx: nx, ty: ny, th: nh, startMs: totalMs - dur, endMs: totalMs, speedCmPs: velCmPs, label: b.type, ticks, effCm: -chord, dur, marker: null });
-        x = nx; y = ny; h = nh;
+        pushArcTurn(idx, delta, arcR, -1, spdMax, b.type, { rawNominalCm: cm, ticks });
         break;
       }
       case 'FF_TIME': {
+        turnExitCarryCm = 0;
         const ms = evalExpression(p.ms, vars, 400);
         pushMove(idx, (getCalibratedSpeedCmPerSec(spd, cal) * ms) / 1000, spd, `FF ${ms}ms`, null, false);
         break;
       }
       case 'BB_TIME': {
+        turnExitCarryCm = 0;
         const ms = evalExpression(p.ms, vars, 400);
         pushMove(idx, -(getCalibratedSpeedCmPerSec(spd, cal) * ms) / 1000, spd, `BB ${ms}ms`, null, false);
         break;
@@ -210,29 +307,33 @@ export function buildSimSegments(state) {
       case 'SETF':
       case 'SETF_BACK':
       case 'SETF_DIR': {
+        turnExitCarryCm = 0;
         const backCm = evalExpression(p.cm, vars, 0);
         const d = p.dir ? resolveDirValue(p.dir, vars) : '';
         pushMove(idx, grid.cellCm * 0.4, spd, 'SetF Align', 'line');
         if (backCm) pushMove(idx, -backCm, spd, `Back ${backCm}cm`);
-        if (d) pushTurn(idx, dirToAngle(d), `Turn '${d}'`);
+        if (d) pushTurn(idx, dirToAngle(d), `Spin '${d}'`, false);
         break;
       }
       case 'SETB':
       case 'SETB_FWD':
       case 'SETB_DIR': {
+        turnExitCarryCm = 0;
         const fwdCm = evalExpression(p.cm, vars, 0);
         const d = p.dir ? resolveDirValue(p.dir, vars) : '';
         pushMove(idx, -grid.cellCm * 0.4, spd, 'SetB Align', 'line');
         if (fwdCm) pushMove(idx, fwdCm, spd, `Fwd ${fwdCm}cm`);
-        if (d) pushTurn(idx, dirToAngle(d), `Turn '${d}'`);
+        if (d) pushTurn(idx, dirToAngle(d), `Spin '${d}'`, false);
         break;
       }
       case 'DROPF_SPD':
+        turnExitCarryCm = 0;
         pushMove(idx, grid.cellCm * 0.4, spd, 'DropF Check', 'line');
         totalMs += 200;
         segments.push({ blockIdx: idx, fx: x, fy: y, fh: h, tx: x, ty: y, th: h, startMs: totalMs - 200, endMs: totalMs, speedCmPs: 0, label: 'DropF Cube', ticks: 0, effCm: 0, dur: 200, marker: 'drop' });
         break;
       case 'DROPB_SPD':
+        turnExitCarryCm = 0;
         pushMove(idx, -grid.cellCm * 0.4, spd, 'DropB Check', 'line');
         totalMs += 200;
         segments.push({ blockIdx: idx, fx: x, fy: y, fh: h, tx: x, ty: y, th: h, startMs: totalMs - 200, endMs: totalMs, speedCmPs: 0, label: 'DropB Cube', ticks: 0, effCm: 0, dur: 200, marker: 'drop' });
@@ -267,126 +368,211 @@ export function buildSimSegments(state) {
   };
 }
 
-export function drawSimulator(state) {
-  const canvas = document.getElementById('simCanvas');
+function renderSimToTarget(state, canvas, teleIds) {
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   const grid = getGridConfig();
-
-  const W = canvas.width;
-  const H = canvas.height;
-  const pad = 26;
-  const pxPerCm = Math.min((W - pad * 2) / grid.arenaW, (H - pad * 2) / grid.arenaH);
-  const drawW = grid.arenaW * pxPerCm;
-  const drawH = grid.arenaH * pxPerCm;
-  const offX = (W - drawW) * 0.5;
-  const offY = (H - drawH) * 0.5;
-  const toPxX = (cm) => offX + cm * pxPerCm;
-  const toPxY = (cm) => offY + cm * pxPerCm;
-
-  ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#070b14';
-  ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = '#0c1322';
-  ctx.fillRect(offX, offY, drawW, drawH);
-
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.07)';
-  ctx.lineWidth = 1;
-  const subStepCm = grid.cellCm / 3;
-  for (let cm = subStepCm; cm < grid.arenaW; cm += subStepCm) {
-    const p = toPxX(cm);
-    ctx.beginPath(); ctx.moveTo(p, offY); ctx.lineTo(p, offY + drawH); ctx.stroke();
-  }
-  for (let cm = subStepCm; cm < grid.arenaH; cm += subStepCm) {
-    const p = toPxY(cm);
-    ctx.beginPath(); ctx.moveTo(offX, p); ctx.lineTo(offX + drawW, p); ctx.stroke();
-  }
-
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.28)';
-  ctx.lineWidth = 1.2;
-  ctx.font = '10px "JetBrains Mono", monospace';
-  ctx.fillStyle = '#64748b';
-  for (let c = 0; c <= grid.cols; c++) {
-    const px = toPxX(c * grid.cellCm);
-    ctx.beginPath(); ctx.moveTo(px, offY); ctx.lineTo(px, offY + drawH); ctx.stroke();
-    if (c < grid.cols) ctx.fillText(String(c), px + 3, offY - 6);
-  }
-  for (let r = 0; r <= grid.rows; r++) {
-    const py = toPxY(r * grid.cellCm);
-    ctx.beginPath(); ctx.moveTo(offX, py); ctx.lineTo(offX + drawW, py); ctx.stroke();
-    if (r < grid.rows) ctx.fillText(String(r), offX - 16, py + 12);
-  }
-
-  ctx.strokeStyle = '#38bdf8';
-  ctx.lineWidth = 1.6;
-  ctx.strokeRect(offX, offY, drawW, drawH);
-  ctx.fillStyle = '#94a3b8';
-  ctx.fillText(`${grid.cols}x${grid.rows} (${grid.cellCm}cm/cell = ${grid.arenaW}x${grid.arenaH}cm)`, offX, H - 7);
-
+  const fieldMap = state.fieldMap;
+  const hasFieldGrid = Array.isArray(fieldMap?.gridData) && fieldMap.gridData.length > 0;
   const segs = state.sim.segments;
-  if (segs.length > 0) {
-    ctx.save();
-    ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(toPxX(segs[0].fx), toPxY(segs[0].fy));
-    for (const seg of segs) ctx.lineTo(toPxX(seg.tx), toPxY(seg.ty));
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  for (let i = 0; i <= state.sim.segIdx && i < segs.length; i++) {
-    const seg = segs[i];
-    const t = i === state.sim.segIdx ? state.sim.segProgress : 1;
-    const cx = seg.fx + (seg.tx - seg.fx) * t;
-    const cy = seg.fy + (seg.ty - seg.fy) * t;
-
-    ctx.strokeStyle = seg.marker === 'line' ? '#34d399' : '#38bdf8';
-    ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.moveTo(toPxX(seg.fx), toPxY(seg.fy)); ctx.lineTo(toPxX(cx), toPxY(cy)); ctx.stroke();
-
-    if (t >= 0.99 && seg.marker === 'drop') {
-      ctx.fillStyle = '#f59e0b';
-      ctx.beginPath(); ctx.arc(toPxX(seg.tx), toPxY(seg.ty), 5.5, 0, Math.PI * 2); ctx.fill();
-    } else if (t >= 0.99 && seg.marker === 'line') {
-      ctx.fillStyle = '#10b981';
-      ctx.fillRect(toPxX(seg.tx) - 4, toPxY(seg.ty) - 4, 8, 8);
-    }
-  }
-
-  const rx = toPxX(state.sim.robotX);
-  const ry = toPxY(state.sim.robotY);
-  const rad = (state.sim.robotH * Math.PI) / 180;
-  const rHalf = Math.max(7, Math.min(20, 7.5 * pxPerCm));
-
-  ctx.save();
-  ctx.translate(rx, ry);
-  ctx.rotate(rad);
-  ctx.fillStyle = '#334155';
-  ctx.fillRect(-rHalf - 3, -rHalf + 2, 3, rHalf * 2 - 4);
-  ctx.fillRect(rHalf, -rHalf + 2, 3, rHalf * 2 - 4);
-  ctx.fillStyle = '#1e293b';
-  ctx.strokeStyle = '#38bdf8';
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.roundRect(-rHalf, -rHalf, rHalf * 2, rHalf * 2, 4); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = '#10b981';
-  ctx.fillRect(-rHalf + 2, -rHalf - 2, rHalf * 2 - 4, 3);
-  ctx.fillStyle = '#fde047';
-  ctx.beginPath(); ctx.moveTo(0, -rHalf + 3); ctx.lineTo(-4, 4); ctx.lineTo(4, 4); ctx.closePath(); ctx.fill();
-  ctx.restore();
-
-  const activeSeg = segs[Math.min(state.sim.segIdx, Math.max(0, segs.length - 1))];
+  const followCam = !!state.sim.cameraFollowRobot;
   const normHeading = (((Math.round(state.sim.robotH) % 360) + 360) % 360);
+
+  const simOverlay = {
+    tileWidthCm: grid.cellCm,
+    segments: segs,
+    segIdx: state.sim.segIdx,
+    segProgress: state.sim.segProgress,
+    robotX: state.sim.robotX,
+    robotY: state.sim.robotY,
+    robotH: state.sim.robotH
+  };
+
+  if (hasFieldGrid && fieldMap.simViewMode === 'iso') {
+    renderIsometricGrid(canvas, fieldMap.gridData, {
+      cameraRotDeg: fieldMap.simCameraRot || 0,
+      tileWidthCm: grid.cellCm,
+      simOverlay,
+      cameraFollowRobot: followCam
+    });
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '10px "JetBrains Mono", monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(
+      followCam
+        ? `CAM LOCK · 3D ISO · HDG ${normHeading}° · ${grid.cols}x${grid.rows} (${grid.cellCm}cm/cell)`
+        : `3D ISO (${fieldMap.simCameraRot || 0}°) · ${grid.cols}x${grid.rows} (${grid.cellCm}cm/cell)`,
+      12,
+      canvas.height - 8
+    );
+  } else if (hasFieldGrid) {
+    const layout = render2DFieldGrid(canvas, fieldMap.gridData, {
+      showMarkers: !!fieldMap.showMarkers,
+      padding: 26,
+      simOverlay,
+      cameraFollowRobot: followCam
+    });
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '10px "JetBrains Mono", monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(
+      followCam
+        ? `CAM LOCK · 2D · HDG ${normHeading}° · ${grid.cols}x${grid.rows} (${grid.cellCm}cm/cell)`
+        : `${grid.cols}x${grid.rows} (${grid.cellCm}cm/cell = ${grid.arenaW}x${grid.arenaH}cm)`,
+      followCam ? 12 : (layout?.offX ?? 26),
+      canvas.height - 7
+    );
+  } else {
+    const W = canvas.width;
+    const H = canvas.height;
+    const pad = 26;
+    const basePxPerCm = Math.min((W - pad * 2) / grid.arenaW, (H - pad * 2) / grid.arenaH);
+    const pxPerCm = followCam ? Math.max(basePxPerCm * 1.4, Math.min(3.1, Math.min(W, H) / 126)) : basePxPerCm;
+    const drawW = grid.arenaW * pxPerCm;
+    const drawH = grid.arenaH * pxPerCm;
+    const offX = followCam ? 0 : (W - drawW) * 0.5;
+    const offY = followCam ? 0 : (H - drawH) * 0.5;
+    const toPxX = (cm) => offX + cm * pxPerCm;
+    const toPxY = (cm) => offY + cm * pxPerCm;
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#070b14';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    if (followCam) {
+      const rxWorld = state.sim.robotX * pxPerCm;
+      const ryWorld = state.sim.robotY * pxPerCm;
+      const camRad = ((state.sim.robotH || 0) * Math.PI) / 180;
+      ctx.translate(W * 0.5, H * 0.5);
+      ctx.rotate(-camRad);
+      ctx.translate(-rxWorld, -ryWorld);
+    }
+    ctx.fillStyle = '#0c1322';
+    ctx.fillRect(offX, offY, drawW, drawH);
+
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.28)';
+    ctx.lineWidth = 1.2;
+    ctx.font = '10px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#64748b';
+    for (let c = 0; c <= grid.cols; c++) {
+      const px = toPxX(c * grid.cellCm);
+      ctx.beginPath(); ctx.moveTo(px, offY); ctx.lineTo(px, offY + drawH); ctx.stroke();
+      if (c < grid.cols) ctx.fillText(String(c), px + 3, offY - 6);
+    }
+    for (let r = 0; r <= grid.rows; r++) {
+      const py = toPxY(r * grid.cellCm);
+      ctx.beginPath(); ctx.moveTo(offX, py); ctx.lineTo(offX + drawW, py); ctx.stroke();
+      if (r < grid.rows) ctx.fillText(String(r), offX - 16, py + 12);
+    }
+
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 1.6;
+    ctx.strokeRect(offX, offY, drawW, drawH);
+    ctx.restore();
+
+    if (followCam) {
+      ctx.save();
+      ctx.translate(W * 0.5, H * 0.5);
+      ctx.fillStyle = '#1e293b';
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(-10, -10, 20, 20, 4);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#10b981';
+      ctx.fillRect(-8, -12, 16, 3);
+      ctx.fillStyle = '#fde047';
+      ctx.beginPath();
+      ctx.moveTo(0, -7);
+      ctx.lineTo(-4, 4);
+      ctx.lineTo(4, 4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '10px "JetBrains Mono", monospace';
+    ctx.fillText(
+      followCam
+        ? `CAM LOCK · 2D · HDG ${normHeading}° · ${grid.cols}x${grid.rows}`
+        : `${grid.cols}x${grid.rows} (${grid.cellCm}cm/cell = ${grid.arenaW}x${grid.arenaH}cm)`,
+      followCam ? 12 : offX,
+      H - 7
+    );
+  }
+
+  const clampedIdx = Math.min(state.sim.segIdx, Math.max(0, segs.length - 1));
+  const activeSeg = segs[clampedIdx];
   const stats = state.sim.stats;
   const curSpd = activeSeg && activeSeg.speedCmPs > 0 ? `${activeSeg.speedCmPs.toFixed(1)} cm/s` : '0.0 cm/s';
-  const curLabel = activeSeg ? `Step ${Math.min(state.sim.segIdx + 1, segs.length)}/${segs.length}: ${activeSeg.label} · ${curSpd}` : `Ready · ${curSpd}`;
+  let curLabel = `Ready · ${curSpd}`;
+  if (activeSeg) {
+    if (state.sim.activeBlockIndex < 0 && !state.sim.playing && state.sim.segIdx === 0 && state.sim.segProgress === 0) {
+      curLabel = `Start (0/${segs.length}) · 0.0 cm/s`;
+    } else {
+      curLabel = `Step ${clampedIdx + 1}/${segs.length}: ${activeSeg.label} · ${curSpd}`;
+    }
+  }
   const elapsedSec = state.sim.elapsedMs / 1000;
 
-  const teleStep = document.getElementById('teleStep');
-  const telePose = document.getElementById('telePose');
-  const teleClock = document.getElementById('teleClock');
+  const zMm = hasFieldGrid ? getElevationAtCm(fieldMap.gridData, state.sim.robotX, state.sim.robotY, grid.cellCm) : 5;
+  const zNote = Math.round(zMm) !== 5 ? ` · Z:${zMm.toFixed(0)}mm` : '';
+
+  const teleStep = document.getElementById(teleIds.step);
+  const telePose = document.getElementById(teleIds.pose);
+  const teleClock = document.getElementById(teleIds.clock);
+  const teleTile = document.getElementById(teleIds.tile);
   if (teleStep) teleStep.textContent = curLabel;
-  if (telePose) telePose.textContent = `${state.sim.robotX.toFixed(1)}, ${state.sim.robotY.toFixed(1)} cm · ${normHeading}°`;
+  if (telePose) telePose.textContent = `${state.sim.robotX.toFixed(1)}, ${state.sim.robotY.toFixed(1)} cm · ${normHeading}°${zNote}`;
   if (teleClock) teleClock.textContent = `${stats.calibratedCm.toFixed(1)} cm (${stats.totalTicks} t) · ${elapsedSec.toFixed(2)}s / ${stats.estSec.toFixed(2)}s`;
+
+  if (teleTile) {
+    if (hasFieldGrid) {
+      const r = Math.max(0, Math.min(fieldMap.gridData.length - 1, Math.floor(state.sim.robotY / grid.cellCm)));
+      const c = Math.max(0, Math.min((fieldMap.gridData[0]?.length || 1) - 1, Math.floor(state.sim.robotX / grid.cellCm)));
+      const occ = getCellOccupancyMap(fieldMap.gridData);
+      const info = occ[`${r},${c}`];
+      if (info) {
+        const sem = resolveTileSemantics(info.cell.tileId, info.cell.rot);
+        teleTile.textContent = `#${sem.id} ${sem.name} (R${r},C${c})`;
+      } else {
+        teleTile.textContent = `ช่องว่าง (R${r},C${c}) · 5mm`;
+      }
+    } else {
+      teleTile.textContent = 'Default Grid';
+    }
+  }
+}
+
+export function drawSimulator(state) {
+  const mainCanvas = document.getElementById('simCanvas');
+  if (mainCanvas) {
+    renderSimToTarget(state, mainCanvas, {
+      step: 'teleStep',
+      pose: 'telePose',
+      clock: 'teleClock',
+      tile: 'teleTile'
+    });
+  }
+
+  const codeView = document.getElementById('viewCode');
+  const codeLayout = document.getElementById('codeLayout');
+  const codeCanvas = document.getElementById('codeSimCanvas');
+  if (
+    codeCanvas &&
+    codeView?.classList.contains('active') &&
+    !codeLayout?.classList.contains('code-sim-collapsed')
+  ) {
+    renderSimToTarget(state, codeCanvas, {
+      step: 'codeTeleStep',
+      pose: 'codeTelePose',
+      clock: 'codeTeleClock',
+      tile: 'codeTeleTile'
+    });
+  }
 }

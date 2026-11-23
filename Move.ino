@@ -376,8 +376,8 @@ float moveForward(int speed, float &previous_error, float KP, float KD) {
     int base = speed;
     int pd_value = computeFusedSteer(KP, KD, speed, error, base);
 
-    int trimL = (motorTrim < 0) ? motorTrim : 0;
-    int trimR = (motorTrim > 0) ? motorTrim : 0;
+    int trimL = getLeftMotorTrim();
+    int trimR = getRightMotorTrim();
     int speed_left  = base + pd_value + trimL;
     int speed_right = base - pd_value + trimR;
 
@@ -391,8 +391,8 @@ float moveBackward(int speed, float &previous_error, float KP, float KD) {
     int base = speed;
     int pd_value = computeFusedSteer(KP, KD, speed, error, base);
 
-    int trimL = (motorTrim < 0) ? motorTrim : 0;
-    int trimR = (motorTrim > 0) ? motorTrim : 0;
+    int trimL = getLeftMotorTrim();
+    int trimR = getRightMotorTrim();
     int speed_left  = -(base - pd_value) - trimL;
     int speed_right = -(base + pd_value) - trimR;
 
@@ -845,6 +845,7 @@ void BB_turn(int speed, unsigned long timer, char select) {
 // 2.7 กลุ่มจัดแนวเข้าเส้นดำและรีเซ็ต Gyroscope (SetFront_Yaw / SetBack_Yaw / SetF / SetB)
 // ============================================================================
 bool SetFront_Yaw(int speed) {
+    clearTurnDistCarry();
     missionNotifyCommand("SetF();", 9);
     const unsigned long align_timeout = 2500;
     unsigned long start_time = millis();
@@ -952,6 +953,7 @@ void SetFront_time(int speed, unsigned long target, char select) {
 }
 
 bool SetBack_Yaw(int speed) {
+    clearTurnDistCarry();
     missionNotifyCommand("SetB();", 10);
     const unsigned long align_timeout = 2500;
     unsigned long start_time = millis();
@@ -1081,13 +1083,11 @@ void SetF(int speed, float backCm, char dir) {
     snprintf(s_compoundMain, sizeof(s_compoundMain), "SetF(%d,%.0f,'%c');", speed, backCm, dir);
     SetFront_Yaw(speed);
     if (backCm > 0.0f) {
-        BC(speed, backCm, dir);
-    } else {
-        if (dir == 'L')      SpinDegree(-90.0f);
-        else if (dir == 'R') SpinDegree(90.0f);
-        else if (dir == 'l') TrunDegreeBack(-90.0f);
-        else if (dir == 'r') TrunDegreeBack(90.0f);
+        BC(speed, backCm, true);
+        delay(10);
     }
+    if (dir == 'L' || dir == 'l')      SpinDegree(-90.0f);
+    else if (dir == 'R' || dir == 'r') SpinDegree(90.0f);
     s_inCompoundCmd = false;
     missionFinishCommandBeep();
 }
@@ -1114,13 +1114,11 @@ void SetB(int speed, float fwdCm, char dir) {
     snprintf(s_compoundMain, sizeof(s_compoundMain), "SetB(%d,%.0f,'%c');", speed, fwdCm, dir);
     SetBack_Yaw(speed);
     if (fwdCm > 0.0f) {
-        FC(speed, fwdCm, dir);
-    } else {
-        if (dir == 'L')      SpinDegree(-90.0f);
-        else if (dir == 'R') SpinDegree(90.0f);
-        else if (dir == 'l') TrunDegreeFront(-90.0f);
-        else if (dir == 'r') TrunDegreeFront(90.0f);
+        FC(speed, fwdCm, true);
+        delay(10);
     }
+    if (dir == 'L' || dir == 'l')      SpinDegree(-90.0f);
+    else if (dir == 'R' || dir == 'r') SpinDegree(90.0f);
     s_inCompoundCmd = false;
     missionFinishCommandBeep();
 }

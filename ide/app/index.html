@@ -258,10 +258,49 @@
       <line x1="9" y1="18" x2="15" y2="18" />
       <rect x="4" y="2" width="16" height="20" rx="2" />
     </symbol>
+    <symbol id="ico-map" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6" />
+      <line x1="8" y1="2" x2="8" y2="18" />
+      <line x1="16" y1="6" x2="16" y2="22" />
+    </symbol>
+    <symbol id="ico-cube" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+      <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+      <line x1="12" y1="22.08" x2="12" y2="12" />
+    </symbol>
+    <symbol id="ico-print" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="6 9 6 2 18 2 18 9" />
+      <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+      <rect x="6" y="14" width="12" height="8" />
+    </symbol>
+    <symbol id="ico-scan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 7V5a2 2 0 0 1 2-2h2" />
+      <path d="M17 3h2a2 2 0 0 1 2 2v2" />
+      <path d="M21 17v2a2 2 0 0 1-2 2h-2" />
+      <path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+      <line x1="7" y1="12" x2="17" y2="12" />
+    </symbol>
+    <symbol id="ico-rotate" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="23 4 23 10 17 10" />
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+    </symbol>
+    <symbol id="ico-flip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="8 3 4 7 8 11" />
+      <polyline points="16 3 20 7 16 11" />
+      <line x1="12" y1="3" x2="12" y2="21" />
+    </symbol>
+    <symbol id="ico-eraser" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M20 20H7L3 16c-.6-.6-.6-1.5 0-2.1l10-10c.6-.6 1.5-.6 2.1 0l6 6c.6.6.6 1.5 0 2.1L14 19" />
+      <path d="M6 11l7 7" />
+    </symbol>
+    <symbol id="ico-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </symbol>
   </svg>
 
   <!-- Top Workbench Header -->
-  <header class="topbar">
+  <header class="topbar no-print">
     <a class="skip-link" href="#top">ข้ามไปยังพื้นที่ทำงาน</a>
 
     <div class="brand">
@@ -283,9 +322,18 @@
         <svg class="svg-ico"><use href="#ico-code"></use></svg>
         <span>Arduino C++</span>
       </button>
+      <button class="mode-btn" id="btnModeMap" data-mode="map" type="button">
+        <svg class="svg-ico"><use href="#ico-map"></use></svg>
+        <span>Map Manager</span>
+      </button>
     </div>
 
     <div class="toolbar-actions">
+      <button class="btn btn-secondary" id="btnTopQuickScan" type="button" title="เปิดโหมดสแกนสนามด้วยกล้อง Webcam ทันที">
+        <svg class="svg-ico"><use href="#ico-scan"></use></svg>
+        <span>สแกนสนาม</span>
+      </button>
+
       <div class="autosave-pill" id="autoSaveWrap" title="เปิด/ปิดระบบ Auto Save อัตโนมัติลงเครื่อง">
         <button type="button" class="m-switch compact" id="btnToggleAutoSave" role="switch" aria-checked="true" aria-label="Auto Save">
           <span class="m-switch-track"><span class="m-switch-thumb"></span></span>
@@ -564,11 +612,39 @@
             </label>
           </div>
 
+          <!-- Compact Field Map Quick Controls -->
+          <div class="sim-field-bar">
+            <div class="sim-field-group">
+              <button class="btn btn-xs btn-secondary" id="btnSimViewMode" type="button" title="สลับมุมมอง 2D Top-Down / 3D Isometric">
+                <svg class="svg-ico sm"><use href="#ico-cube"></use></svg>
+                <span>2D View</span>
+              </button>
+              <button class="btn btn-xs btn-ghost" id="btnSimRotateIso" type="button" title="หมุนกล้อง 3D Isometric 90°" hidden>
+                <svg class="svg-ico sm"><use href="#ico-rotate"></use></svg>
+                <span>0°</span>
+              </button>
+              <button class="btn btn-xs btn-ghost" id="btnSimSyncStart" type="button" title="ตั้งตำแหน่งเริ่มต้นหุ่นยนต์ไปที่แผ่น START (#31)">
+                <svg class="svg-ico sm"><use href="#ico-sync"></use></svg>
+                <span>START</span>
+              </button>
+            </div>
+            <div class="sim-field-actions">
+              <button class="btn btn-xs btn-secondary" id="btnSimQuickScan" type="button" title="เปิดโหมดสแกนสนามด้วยกล้อง Webcam">
+                <svg class="svg-ico sm"><use href="#ico-scan"></use></svg>
+                <span>สแกนสนาม</span>
+              </button>
+              <button class="btn btn-xs btn-primary" id="btnOpenMapManager" type="button" title="เปิดระบบจัดวางสนาม พิมพ์ 1:1 และสแกน Webcam">
+                <svg class="svg-ico sm"><use href="#ico-map"></use></svg>
+                <span>Map Manager</span>
+              </button>
+            </div>
+          </div>
+
           <div class="sim-canvas-wrap">
             <canvas id="simCanvas" width="420" height="420"></canvas>
           </div>
 
-          <!-- Structured 3-Metric Telemetry Grid -->
+          <!-- Structured 4-Metric Telemetry Grid -->
           <div class="sim-telemetry-grid" id="simTelemetry">
             <div class="tele-cell">
               <span class="tele-lbl">Active Step &amp; Speed</span>
@@ -581,6 +657,10 @@
             <div class="tele-cell">
               <span class="tele-lbl">Distance &amp; Clock</span>
               <strong class="tele-val accent" id="teleClock">0.0 cm (0 t) · 0.00s</strong>
+            </div>
+            <div class="tele-cell">
+              <span class="tele-lbl">Current Field Tile</span>
+              <strong class="tele-val" id="teleTile">#31 START (R5,C1)</strong>
             </div>
           </div>
         </aside>
@@ -646,6 +726,10 @@
                 <svg class="svg-ico sm"><use href="#ico-search"></use></svg>
                 <span>Find</span>
               </button>
+              <button class="btn btn-xs btn-secondary active" id="btnToggleCodeSim" type="button" title="แสดง/ซ่อนหน้าต่าง Simulation Field ด้านขวา">
+                <svg class="svg-ico sm"><use href="#ico-grid"></use></svg>
+                <span>Sim</span>
+              </button>
               <button class="btn btn-xs btn-ghost" id="btnCodeIdePrefs" type="button" title="ตั้งค่าสี Syntax / Autocomplete / เดาคำ">
                 <svg class="svg-ico sm"><use href="#ico-sliders"></use></svg>
                 <span>Settings</span>
@@ -698,12 +782,396 @@
             <span class="status-right" id="statusIndentLabel">Spaces: 4 · UTF-8 · Arduino C++</span>
           </div>
         </section>
+
+        <div class="pane-resizer vertical" id="resizerCodeSim" role="separator" aria-orientation="vertical" title="ลากเพื่อปรับขนาด Simulation ในโหมด C++"></div>
+
+        <aside class="code-sim-pane" id="codeSimPane" aria-label="Code Live Simulator">
+          <div class="pane-header">
+            <div class="pane-title">
+              <svg class="svg-ico"><use href="#ico-grid"></use></svg>
+              <span>Live Simulator</span>
+            </div>
+            <div class="pane-tools">
+              <button class="btn btn-xs btn-primary" id="btnCodeSimPlay" type="button" title="จำลองการวิ่งทั้งหมด">
+                <svg class="svg-ico sm"><use href="#ico-play"></use></svg>
+                <span>Run</span>
+              </button>
+              <button class="btn btn-xs btn-secondary" id="btnCodeSimStep" type="button" title="ทำงานทีละขั้น">
+                <svg class="svg-ico sm"><use href="#ico-step"></use></svg>
+                <span>Step</span>
+              </button>
+              <button class="btn btn-xs btn-ghost" id="btnCodeSimReset" type="button" title="รีเซ็ตตำแหน่งหุ่น">
+                <svg class="svg-ico sm"><use href="#ico-reset"></use></svg>
+              </button>
+              <button class="btn btn-xs btn-secondary" id="btnCodeSimViewMode" type="button" title="สลับมุมมอง 2D / 3D Isometric">
+                <svg class="svg-ico sm"><use href="#ico-cube"></use></svg>
+                <span>2D View</span>
+              </button>
+              <button class="btn btn-xs btn-ghost" id="btnCodeSimRotateIso" type="button" title="หมุนกล้อง 3D Isometric 90°" hidden>
+                <svg class="svg-ico sm"><use href="#ico-rotate"></use></svg>
+                <span>0°</span>
+              </button>
+              <button class="btn-icon xs" id="btnCloseCodeSim" type="button" title="ซ่อน Live Simulator">
+                <svg class="svg-ico sm"><use href="#ico-sidebar-right"></use></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="code-sim-hint" id="codeSimHint">คลิกบรรทัดใน RunMode1–3.ino เพื่อย้ายจุดจำลอง</div>
+
+          <div class="sim-canvas-wrap">
+            <canvas id="codeSimCanvas" width="380" height="380"></canvas>
+          </div>
+
+          <div class="sim-telemetry-grid" id="codeSimTelemetry">
+            <div class="tele-cell">
+              <span class="tele-lbl">Active Step &amp; Speed</span>
+              <strong class="tele-val" id="codeTeleStep">Ready · 0.0 cm/s</strong>
+            </div>
+            <div class="tele-cell">
+              <span class="tele-lbl">Pose (X, Y, Heading)</span>
+              <strong class="tele-val" id="codeTelePose">45.0, 165.0 cm · 0°</strong>
+            </div>
+            <div class="tele-cell">
+              <span class="tele-lbl">Distance &amp; Clock</span>
+              <strong class="tele-val accent" id="codeTeleClock">0.0 cm (0 t) · 0.00s</strong>
+            </div>
+            <div class="tele-cell">
+              <span class="tele-lbl">Current Field Tile</span>
+              <strong class="tele-val" id="codeTeleTile">#31 START (R5,C1)</strong>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- MODE 3: KT_ATOM_Middle - [MAP MANAGER] (29 Standard Tiles + 1:1 Print + Offline Webcam CV + 3D JSON) -->
+    <section class="mode-view" id="viewMap">
+      <div class="map-topbar no-print">
+        <div class="map-brand">
+          <svg class="svg-ico"><use href="#ico-map"></use></svg>
+          <div>
+            <strong>KT_ATOM_Middle - [MAP MANAGER]</strong>
+            <span class="muted">ระบบจัดวางสนาม 29 รูปแบบ · พิมพ์ 1:1 · สแกน Webcam (Offline 100%) · 3D JSON</span>
+          </div>
+        </div>
+
+        <div class="map-tab-bar" role="tablist" aria-label="Map Manager Modules">
+          <button type="button" class="map-tab-btn active" data-map-tab="design">
+            <svg class="svg-ico sm"><use href="#ico-grid"></use></svg>
+            <span>1. ออกแบบสนาม (2D / 3D)</span>
+          </button>
+          <button type="button" class="map-tab-btn" data-map-tab="print">
+            <svg class="svg-ico sm"><use href="#ico-print"></use></svg>
+            <span>2. พิมพ์ใบประกอบ 1:1</span>
+          </button>
+          <button type="button" class="map-tab-btn" data-map-tab="scan">
+            <svg class="svg-ico sm"><use href="#ico-scan"></use></svg>
+            <span>3. สแกน Webcam &amp; 3D JSON</span>
+          </button>
+        </div>
+
+        <button type="button" class="btn btn-sm btn-primary" id="btnMapBackToSim">
+          <svg class="svg-ico sm"><use href="#ico-play"></use></svg>
+          <span>กลับไปทดสอบหุ่นใน Simulator</span>
+        </button>
+      </div>
+
+      <!-- Module 1: Modular Field Designer & 3D Isometric Engine -->
+      <div class="map-tab-panel active" id="tab-design">
+        <div class="map-design-layout">
+          <aside class="map-catalog-pane no-print">
+            <div class="pane-header">
+              <div class="pane-title">
+                <svg class="svg-ico sm"><use href="#ico-grid"></use></svg>
+                <span>คลังแผ่นมาตรฐาน (29 แบบ)</span>
+              </div>
+            </div>
+
+            <div class="map-dim-grid">
+              <label>
+                <span>Rows (Y)</span>
+                <input type="number" id="mapRowsInput" min="2" max="24" value="7" />
+              </label>
+              <label>
+                <span>Cols (X)</span>
+                <input type="number" id="mapColsInput" min="2" max="24" value="7" />
+              </label>
+              <label>
+                <span>Tile (cm)</span>
+                <input type="number" id="mapTileCmInput" min="5" max="200" value="30" />
+              </label>
+            </div>
+
+            <div class="map-cat-filters" id="mapCategoryFilters"></div>
+            <div class="tile-catalog-grid" id="mapTileCatalog"></div>
+          </aside>
+
+          <section class="map-stage-pane">
+            <div class="map-stage-toolbar no-print">
+              <div class="map-tool-group">
+                <button type="button" class="btn btn-xs btn-secondary active" id="mapToolPlace">
+                  <svg class="svg-ico sm"><use href="#ico-blocks"></use></svg>
+                  <span>วางแผ่น</span>
+                </button>
+                <button type="button" class="btn btn-xs btn-secondary" id="mapToolErase">
+                  <svg class="svg-ico sm"><use href="#ico-eraser"></use></svg>
+                  <span>ลบแผ่น</span>
+                </button>
+                <button type="button" class="btn btn-xs btn-secondary" id="mapPlaceRotBtn" title="หมุนแผ่นที่จะวาง 90°">
+                  <svg class="svg-ico sm"><use href="#ico-rotate"></use></svg>
+                  <span>หมุน 0°</span>
+                </button>
+                <label class="map-chk-pill" title="แสดง ArUco Marker บนแผ่นในมุมมอง 2D">
+                  <input type="checkbox" id="mapShowMarkersChk" checked />
+                  <span>ArUco</span>
+                </label>
+                <label class="map-chk-pill" title="แสดงเส้นทางจำลองของหุ่นยนต์ซ้อนบนสนาม">
+                  <input type="checkbox" id="mapShowRobotPathChk" checked />
+                  <span>เส้นทางหุ่น</span>
+                </label>
+              </div>
+
+              <div class="map-tool-group">
+                <button type="button" class="btn btn-xs btn-secondary active" id="mapViewMode2D">
+                  <svg class="svg-ico sm"><use href="#ico-grid"></use></svg>
+                  <span>2D Top-Down</span>
+                </button>
+                <button type="button" class="btn btn-xs btn-secondary" id="mapViewModeIso">
+                  <svg class="svg-ico sm"><use href="#ico-cube"></use></svg>
+                  <span>3D Isometric</span>
+                </button>
+                <button type="button" class="btn btn-xs btn-ghost" id="mapCamRotBtn" title="หมุนมุมกล้อง 3D Isometric (0°, 90°, 180°, 270°)" disabled>
+                  <svg class="svg-ico sm"><use href="#ico-rotate"></use></svg>
+                  <span>กล้อง 0°</span>
+                </button>
+              </div>
+
+              <div class="map-tool-group">
+                <button type="button" class="btn btn-xs btn-secondary" id="mapBtnPreset">
+                  <span>Preset ระดับกลาง</span>
+                </button>
+                <button type="button" class="btn btn-xs btn-danger-soft" id="mapBtnClear">
+                  <span>ล้างสนาม</span>
+                </button>
+                <button type="button" class="btn btn-xs btn-secondary" id="mapBtnExportJsonDesign">
+                  <svg class="svg-ico sm"><use href="#ico-download"></use></svg>
+                  <span>Export 3D JSON</span>
+                </button>
+                <button type="button" class="btn btn-xs btn-secondary" id="mapBtnImportJsonDesign">
+                  <svg class="svg-ico sm"><use href="#ico-upload"></use></svg>
+                  <span>Import JSON</span>
+                </button>
+                <input type="file" id="mapImportJsonInput" accept=".json,application/json" hidden />
+              </div>
+            </div>
+
+            <div class="map-canvas-wrap">
+              <canvas id="mapDesignCanvas" width="900" height="620"></canvas>
+            </div>
+
+            <div class="map-inspector-bar no-print" id="mapInspectorBar">
+              <span class="insp-badge" id="inspCoord">(-, -)</span>
+              <strong class="insp-title" id="inspTileTitle">คลิกซ้ายวาง/ลบ · คลิกขวาหมุน 90°</strong>
+              <span class="insp-chip" id="inspElevation">ฐาน 5mm</span>
+              <span class="insp-chip" id="inspCube">-</span>
+              <span class="insp-rules" id="inspRules">เลื่อนเมาส์เหนือตารางเพื่อตรวจสอบกติกาและเรขาคณิต 3D ของแผ่นสนาม</span>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- Module 2: Exact 1:1 Print & Cutout Sheet Generator -->
+      <div class="map-tab-panel" id="tab-print">
+        <div class="map-print-layout">
+          <aside class="map-print-sidebar no-print">
+            <div class="pane-header">
+              <div class="pane-title">
+                <svg class="svg-ico sm"><use href="#ico-print"></use></svg>
+                <span>ตั้งค่ากระดาษ &amp; จำนวนพิมพ์ 1:1</span>
+              </div>
+            </div>
+
+            <div class="print-controls-box">
+              <label>
+                <span>ขนาดกระดาษจริง (Paper Size)</span>
+                <select id="printPaperSelect">
+                  <option value="A4" selected>A4 (297 × 210 mm)</option>
+                  <option value="A3">A3 (420 × 297 mm)</option>
+                  <option value="Letter">Letter (279.4 × 215.9 mm)</option>
+                </select>
+              </label>
+              <label>
+                <span>แนวกระดาษ (Orientation)</span>
+                <select id="printOrientSelect">
+                  <option value="landscape" selected>แนวนอน (Landscape)</option>
+                  <option value="portrait">แนวตั้ง (Portrait)</option>
+                </select>
+              </label>
+
+              <div class="print-default-row">
+                <label class="print-default-input-wrap" title="จำนวนแผ่นเริ่มต้นต่อแบบสำหรับตั้งค่าทุกแบบหรือเมื่อติ๊กเลือกแผ่นใหม่">
+                  <span>เริ่มต้น/แบบ</span>
+                  <input type="number" id="printDefaultQtyInput" min="1" max="99" value="5" />
+                </label>
+                <button type="button" class="btn btn-xs btn-secondary" id="printBtnApplyDefaultQty">
+                  <span>ตั้งค่าทุกแบบเป็น 5 ชิ้น</span>
+                </button>
+              </div>
+
+              <div class="print-btn-row">
+                <button type="button" class="btn btn-xs btn-secondary" id="printSelectModeToggle" title="เปิดเพื่อคลิกที่การ์ดแผ่นเพื่อติ๊กเลือก/ไม่เลือกได้อย่างรวดเร็ว">
+                  <svg class="svg-ico sm"><use href="#ico-check"></use></svg>
+                  <span>โหมดติ๊กเลือกเร็ว</span>
+                </button>
+                <button type="button" class="btn btn-xs btn-secondary" id="printBtnSelectAll">
+                  <span>เลือกทั้งหมด</span>
+                </button>
+                <button type="button" class="btn btn-xs btn-ghost" id="printBtnDeselectAll" title="นำเครื่องหมายถูกออกโดยคงจำนวนเดิมไว้">
+                  <span>ไม่เลือกทั้งหมด</span>
+                </button>
+              </div>
+
+              <div class="print-btn-row">
+                <button type="button" class="btn btn-xs btn-secondary" id="printBtnSyncField">
+                  <svg class="svg-ico sm"><use href="#ico-sync"></use></svg>
+                  <span>ซิงก์จำนวนจากสนาม</span>
+                </button>
+                <button type="button" class="btn btn-xs btn-ghost" id="printBtnClearAll">
+                  <span>รีเซ็ต 0 ทั้งหมด</span>
+                </button>
+              </div>
+
+              <button type="button" class="btn btn-primary print-exec-btn" id="printBtnExecute">
+                <svg class="svg-ico sm"><use href="#ico-print"></use></svg>
+                <span>พิมพ์เอกสาร 1:1 (Print / PDF)</span>
+              </button>
+
+              <div class="print-metrics-box" id="printMetricsText">กำลังคำนวณขนาดมิลลิเมตรจริง...</div>
+            </div>
+
+            <div class="print-qty-grid" id="printQtyGrid"></div>
+          </aside>
+
+          <section class="print-preview-stage">
+            <div id="printSheetsContainer"></div>
+          </section>
+        </div>
+      </div>
+
+      <!-- Module 3: Offline Computer Vision Webcam Scanner & 3D JSON Pipeline -->
+      <div class="map-tab-panel" id="tab-scan">
+        <div class="map-scan-layout">
+          <section class="map-scan-main">
+            <div class="scan-toolbar no-print">
+              <button type="button" class="btn btn-xs btn-primary" id="scanBtnStartCam">
+                <svg class="svg-ico sm"><use href="#ico-camera"></use></svg>
+                <span>เปิดกล้อง Webcam</span>
+              </button>
+              <button type="button" class="btn btn-xs btn-danger-soft" id="scanBtnStopCam" disabled>
+                <span>หยุดกล้อง</span>
+              </button>
+              <button type="button" class="btn btn-xs btn-secondary active" id="scanBtnMirrorCam">
+                <svg class="svg-ico sm"><use href="#ico-flip"></use></svg>
+                <span>กลับด้านภาพ: เปิด</span>
+              </button>
+              <label class="map-chk-pill" title="เริ่มนับถอยหลัง 3 วินาทีอัตโนมัติเมื่อตรวจพบกระดานฐาน">
+                <input type="checkbox" id="scanAutoCountdownChk" checked />
+                <span>นับถอยหลัง 3 วิ</span>
+              </label>
+              <button type="button" class="btn btn-xs btn-secondary" id="scanBtnManualSnap" disabled>
+                <span>จับภาพทันที</span>
+              </button>
+              <button type="button" class="btn btn-xs btn-secondary" id="scanBtnUploadPhoto">
+                <svg class="svg-ico sm"><use href="#ico-image"></use></svg>
+                <span>อัปโหลดรูป</span>
+              </button>
+              <input type="file" id="scanPhotoInput" accept="image/*" hidden />
+              <button type="button" class="btn btn-xs btn-secondary" id="scanBtnDemoBoard" title="จำลองกระดานฐานที่มีมุมเอียง Perspective เพื่อทดสอบ Offline CV โดยไม่ต้องใช้กล้องจริง">
+                <svg class="svg-ico sm"><use href="#ico-scan"></use></svg>
+                <span>ทดสอบสแกนจำลอง</span>
+              </button>
+            </div>
+
+            <div class="scan-status-bar" id="scanStatusText" data-tone="neutral">
+              พร้อมสแกน (Offline 100%) — กด "เปิดกล้อง Webcam" หรือ "ทดสอบสแกนจำลอง"
+            </div>
+
+            <div class="webcam-box" id="scanWebcamBox">
+              <video id="scanVideo" playsinline muted hidden></video>
+              <canvas id="scanCanvas" class="mirrored" width="960" height="720"></canvas>
+              <div class="scan-countdown-overlay" id="scanCountdownOverlay" hidden>
+                <div class="scan-countdown-ring">
+                  <span id="scanCountdownNum">3</span>
+                  <small>ถือกระดานให้นิ่ง...</small>
+                </div>
+              </div>
+            </div>
+
+            <div class="scan-result-panel" id="scanResultPanel" hidden>
+              <div class="scan-result-head">
+                <div>
+                  <strong>ผลลัพธ์การถอดรหัสสนาม</strong>
+                  <p class="muted" id="scanResultSummary">-</p>
+                </div>
+                <div class="scan-result-actions">
+                  <button type="button" class="btn btn-xs btn-primary" id="scanBtnApplyToField">
+                    <svg class="svg-ico sm"><use href="#ico-check"></use></svg>
+                    <span>ใช้สนามนี้ทันที</span>
+                  </button>
+                  <button type="button" class="btn btn-xs btn-secondary" id="scanBtnRescan">
+                    <svg class="svg-ico sm"><use href="#ico-refresh"></use></svg>
+                    <span>สแกนใหม่</span>
+                  </button>
+                  <button type="button" class="btn btn-xs btn-secondary" id="scanBtnExportScannedJson">
+                    <svg class="svg-ico sm"><use href="#ico-download"></use></svg>
+                    <span>ส่งออก 3D JSON</span>
+                  </button>
+                </div>
+              </div>
+              <div class="scan-result-previews">
+                <div class="scan-prev-card">
+                  <span>2D Top-Down</span>
+                  <canvas id="scanResultPreview2D" width="320" height="320"></canvas>
+                </div>
+                <div class="scan-prev-card">
+                  <span>3D Isometric (True mm)</span>
+                  <canvas id="scanResultPreview3D" width="380" height="320"></canvas>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <aside class="map-json-pane no-print">
+            <div class="pane-header">
+              <div class="pane-title">
+                <svg class="svg-ico sm"><use href="#ico-code"></use></svg>
+                <span>3D JSON Pipeline (3.0)</span>
+              </div>
+              <div class="pane-tools">
+                <button type="button" class="btn btn-xs btn-ghost" id="jsonBtnCopy" title="คัดลอก JSON">
+                  <svg class="svg-ico sm"><use href="#ico-copy"></use></svg>
+                  <span>Copy</span>
+                </button>
+                <button type="button" class="btn btn-xs btn-secondary" id="jsonBtnDownload">
+                  <svg class="svg-ico sm"><use href="#ico-download"></use></svg>
+                  <span>.JSON</span>
+                </button>
+                <button type="button" class="btn btn-xs btn-secondary" id="jsonBtnImport">
+                  <svg class="svg-ico sm"><use href="#ico-upload"></use></svg>
+                  <span>Import</span>
+                </button>
+              </div>
+            </div>
+            <pre class="map-json-pre" id="mapJsonPreview"></pre>
+          </aside>
+        </div>
       </div>
     </section>
   </main>
 
   <!-- Bottom Drawer (Resizable & Collapsible, Clean Metrics without Env Pill) -->
-  <footer class="bottom-drawer" id="bottomDrawer">
+  <footer class="bottom-drawer no-print" id="bottomDrawer">
     <div class="pane-resizer horizontal" id="resizerDrawer" role="separator" aria-orientation="horizontal" title="ลากเพื่อปรับความสูง Console"></div>
     <div class="drawer-header">
       <div class="drawer-tabs">
@@ -780,7 +1248,7 @@
   </footer>
 
   <!-- Separate IDE Settings Modal (Code Editor Syntax, Autocomplete, Word Prediction) -->
-  <div class="modal-backdrop" id="ideSettingsModal" hidden>
+  <div class="modal-backdrop no-print" id="ideSettingsModal" hidden>
     <div class="modal-card compact-modal" role="dialog" aria-modal="true" aria-labelledby="ideSettingsTitle">
       <div class="modal-header">
         <div class="modal-title-wrap">
@@ -851,6 +1319,34 @@
             </div>
           </div>
 
+          <div class="cfg-section-title">การจำลองสนามและเชื่อมโยงโค้ด (Simulation Link)</div>
+
+          <div class="cfg-row">
+            <div class="cfg-row-info">
+              <label>Click-to-Seek Simulation (คลิกบล็อก/บรรทัดเพื่อย้ายจุดจำลอง)</label>
+              <small>คลิกที่บล็อกคำสั่ง บรรทัดโค้ดพรีวิว หรือบรรทัดในโหมด Arduino C++ เพื่อย้ายตำแหน่งหุ่นยนต์ใน Simulator ไปยังจุดนั้นทันที</small>
+            </div>
+            <div class="cfg-row-control">
+              <button type="button" class="m-switch" id="setClickToSeekSim" role="switch" aria-checked="true">
+                <span class="m-switch-track"><span class="m-switch-thumb"></span></span>
+                <span class="m-switch-lbl">เปิด</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="cfg-row">
+            <div class="cfg-row-info">
+              <label>ล็อกมุมกล้องตามตัวหุ่นยนต์ (Lock Camera on Robot)</label>
+              <small>เมื่อเปิดใช้งาน หุ่นยนต์จะถูกล็อกให้อยู่กึ่งกลางหน้าจอและหันหน้าขึ้นด้านบนเสมอ โดยตัวสนามจะเลื่อนและหมุนตามทิศทางของหุ่นยนต์อัตโนมัติ (ทั้งโหมด 2D และ 3D Iso)</small>
+            </div>
+            <div class="cfg-row-control">
+              <button type="button" class="m-switch" id="setCameraFollowRobot" role="switch" aria-checked="false">
+                <span class="m-switch-track"><span class="m-switch-thumb"></span></span>
+                <span class="m-switch-lbl">ปิด</span>
+              </button>
+            </div>
+          </div>
+
           <div class="cfg-section-title">รูปแบบตัวแก้ไขและขนาดตัวอักษร (Editor Preferences)</div>
 
           <div class="cfg-row">
@@ -912,7 +1408,7 @@
   </div>
 
   <!-- Robot Configuration & Calibrated Simulation Modal -->
-  <div class="modal-backdrop" id="configModal" hidden>
+  <div class="modal-backdrop no-print" id="configModal" hidden>
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="configModalTitle">
       <div class="modal-header">
         <div class="modal-title-wrap">
@@ -1009,7 +1505,7 @@
   </div>
 
   <!-- Local Git-Like Version Control Modal -->
-  <div class="modal-backdrop" id="versionModal" hidden>
+  <div class="modal-backdrop no-print" id="versionModal" hidden>
     <div class="modal-card wide-modal" role="dialog" aria-modal="true" aria-labelledby="versionModalTitle">
       <div class="modal-header">
         <div class="modal-title-wrap">
@@ -1089,7 +1585,7 @@
   </div>
 
   <!-- Image Lightbox Preview Modal -->
-  <div class="modal-backdrop" id="imageLightboxModal" hidden>
+  <div class="modal-backdrop no-print" id="imageLightboxModal" hidden>
     <div class="lightbox-card" role="dialog" aria-modal="true" aria-label="Image Preview">
       <div class="lightbox-bar">
         <span id="lightboxCaption">Preview</span>
@@ -1102,7 +1598,7 @@
   </div>
 
   <!-- Code Editor Keyboard Shortcuts Reference Modal -->
-  <div class="modal-backdrop" id="shortcutsModal" hidden>
+  <div class="modal-backdrop no-print" id="shortcutsModal" hidden>
     <div class="modal-card compact-modal" role="dialog" aria-modal="true" aria-labelledby="shortcutsModalTitle">
       <div class="modal-header">
         <div class="modal-title-wrap">

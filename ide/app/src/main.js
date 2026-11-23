@@ -18,12 +18,22 @@ import {
   CATEGORIES,
   CAT_COLORS,
   buildCommandDefs,
+  MISSION_SECTIONS,
+  getMissionSectionFnName,
   CONFIG_SECTIONS,
   CONFIG_FIELDS,
   SNIPPETS
 } from './blocks/definitions.js';
 import { createCodeIdeController } from './editor/codeIde.js';
-import { buildSimSegments, drawSimulator } from './sim/simulator.js';
+import { buildSimSegments, evalSegmentPose, drawSimulator } from './sim/simulator.js';
+import { createMapManagerController } from './sim/mapManager.js';
+import {
+  loadRescueMiddlePreset,
+  resizeGridData,
+  buildCompactGrid,
+  parseCompactGrid,
+  findStartTileCell
+} from './sim/fieldJson.js';
 
 // ============================================================================
 // Pure SVG Helper (Zero Emojis Anywhere)
@@ -56,15 +66,18 @@ function setBtnContent(btn, iconName, labelText, sizeClass = '') {
 const LAYOUT_STORAGE_KEY = 'kt_middle_ide_canvas_v2';
 const PANEL_STORAGE_KEY = 'kt_middle_ide_panels_v1';
 const AUTOSAVE_STORAGE_KEY = 'kt_middle_ide_autosave_v1';
+const FIELD_MAP_STORAGE_KEY = 'kt_middle_ide_field_map_v3';
 
 const DEFAULT_PANEL_PREFS = {
   toolboxW: 318,
   simW: 370,
+  codeSimW: 340,
   previewH: 136,
   drawerH: 138,
   codeSidebarW: 250,
   toolboxCollapsed: false,
   simCollapsed: false,
+  codeSimCollapsed: false,
   previewCollapsed: false,
   drawerCollapsed: false,
   drawerMaximized: false,
@@ -72,6 +85,36 @@ const DEFAULT_PANEL_PREFS = {
   simConfigCollapsed: false,
   simWide: false
 };
+
+// ============================================================================
+// Mission Section Structure Helpers (Box1 - Box4 & EndMission)
+// ============================================================================
+function createEmptyMissionSections() {
+  return Object.fromEntries(MISSION_SECTIONS.map((s) => [s.id, []]));
+}
+
+function ensureMissionStructure(m) {
+  if (!m) return null;
+  if (!m.sections || typeof m.sections !== 'object') {
+    const legacyBlocks = Array.isArray(m.blocks) ? m.blocks : [];
+    m.sections = createEmptyMissionSections();
+    m.sections.Box1 = legacyBlocks;
+  } else {
+    for (const sec of MISSION_SECTIONS) {
+      if (!Array.isArray(m.sections[sec.id])) m.sections[sec.id] = [];
+    }
+  }
+  delete m.blocks;
+  if (!m.activeSection || !m.sections[m.activeSection]) m.activeSection = 'Box1';
+  if (!m.foldedSections || typeof m.foldedSections !== 'object') m.foldedSections = {};
+  return m;
+}
+
+function getMissionTotalCount(m) {
+  if (!m) return 0;
+  ensureMissionStructure(m);
+  return MISSION_SECTIONS.reduce((sum, sec) => sum + (m.sections[sec.id]?.length || 0), 0);
+}
 
 // ============================================================================
 // Application State
@@ -118,14 +161,17 @@ const state = {
     tbmax: 80
   },
   missions: {
-    'RunMode1.ino': { placed: true, x: 28, y: 28, folded: false, blocks: [] },
-    'RunMode2.ino': { placed: true, x: 528, y: 28, folded: false, blocks: [] },
-    'RunMode3.ino': { placed: false, x: 1028, y: 28, folded: false, blocks: [] }
+    'RunMode1.ino': { placed: true, x: 28, y: 28, folded: false, activeSection: 'Box1', foldedSections: {}, sections: createEmptyMissionSections() },
+    'RunMode2.ino': { placed: true, x: 528, y: 28, folded: false, activeSection: 'Box1', foldedSections: {}, sections: createEmptyMissionSections() },
+    'RunMode3.ino': { placed: false, x: 1028, y: 28, folded: false, activeSection: 'Box1', foldedSections: {}, sections: createEmptyMissionSections() }
   },
   looseBlocks: [],
+  nextLooseZ: 30,
+  lastDuplicatedStackId: -1,
   nextBlockId: 1,
   zoomPct: 100,
   panelPrefs: { ...DEFAULT_PANEL_PREFS },
+  drawerStateBeforeMap: null,
   blockHistory: { past: [], future: [], lastSig: '' },
   autoSave: true,
   autoSaveTimer: null,
@@ -150,7 +196,17 @@ const state = {
     robotX: 45,
     robotY: 165,
     robotH: 0,
-    activeBlockIndex: -1
+    activeBlockIndex: -1,
+    cameraFollowRobot: false
+  },
+  fieldMap: {
+    rows: 7,
+    cols: 7,
+    tileWidthCm: 30,
+    gridData: loadRescueMiddlePreset(7, 7),
+    simViewMode: '2d',
+    simCameraRot: 0,
+    showMarkers: false
   },
   serialPort: null,
   serialReader: null,
@@ -170,6 +226,10 @@ let focusedSlotEl = null;
 // Console & HTTP Helpers
 // ============================================================================
 function updateDocumentTitle() {
+  if (state.mode === 'map') {
+    document.title = 'KT Middle IDE - Map Manager';
+    return;
+  }
   const activeFile = state.mode === 'code' ? state.activeCodeFile : state.activeMissionFile;
   document.title = `KT Middle IDE - ${activeFile || 'RunMode1.ino'}`;
 }
@@ -218,11 +278,28 @@ const codeIde = createCodeIdeController({
     } else if (state.missions[state.activeCodeFile]) {
       parseMissionFile(state.activeCodeFile);
       if (state.activeCodeFile === state.activeMissionFile) {
-        $('visualCodePreview').textContent = state.files[state.activeMissionFile];
+        renderVisualCodePreview(state.files[state.activeMissionFile], state.activeMissionFile);
         rebuildSimAndDraw(false);
       }
       renderCanvas();
     }
+  },
+  onCursorLineChange: ({ file, lineNumber, code }) => {
+    seekSimulationToCodeLine(file, code, lineNumber);
+  },
+  onSettingsChanged: (s) => {
+    state.sim.cameraFollowRobot = !!s.cameraFollowRobot;
+    if (!s.clickToSeekSim && !state.sim.playing) {
+      state.sim.activeBlockIndex = -1;
+      updateSimActiveVisuals();
+      if ($('codeSimHint')) {
+        $('codeSimHint').textContent = 'Click-to-Seek ปิดอยู่ (เปิดได้ที่ IDE Settings)';
+      }
+    } else if (s.clickToSeekSim && $('codeSimHint')) {
+      $('codeSimHint').textContent = 'คลิกบรรทัดใน RunMode1–3.ino เพื่อย้ายจุดจำลอง';
+    }
+    syncSimViewButtons();
+    drawSimulator(state);
   },
   appendConsole
 });
@@ -443,9 +520,226 @@ function serializeVariablesToFile(recordUndo = true) {
 // ============================================================================
 // Mission <-> C++ Bidirectional AST Parser & Code Generator
 // ============================================================================
-function extractMissionBody(code) {
-  const match = code.match(/void\s+runMode[123]\s*\(\s*\)\s*\{([\s\S]*)\}\s*$/);
-  return match ? match[1] : code;
+function countNewlinesBefore(text, idx) {
+  let count = 0;
+  for (let i = 0; i < idx; i++) {
+    if (text.charCodeAt(i) === 10) count++;
+  }
+  return count;
+}
+
+function extractTopLevelVoidFunctionsWithLines(code) {
+  const funcs = {};
+  const text = String(code || '');
+  const sigRe = /\bvoid\s+([A-Za-z_]\w*)\s*\(\s*\)\s*\{/g;
+  let match;
+  while ((match = sigRe.exec(text)) !== null) {
+    const fnName = match[1];
+    const fnStartLine = countNewlinesBefore(text, match.index) + 1;
+    const bodyStart = sigRe.lastIndex;
+    const bodyStartLine = countNewlinesBefore(text, bodyStart) + 1;
+    let depth = 1;
+    let i = bodyStart;
+    let inLineComment = false;
+    let inBlockComment = false;
+    let inString = false;
+    let inChar = false;
+
+    while (i < text.length && depth > 0) {
+      const ch = text[i];
+      const next = text[i + 1];
+      if (inLineComment) {
+        if (ch === '\n') inLineComment = false;
+      } else if (inBlockComment) {
+        if (ch === '*' && next === '/') {
+          inBlockComment = false;
+          i++;
+        }
+      } else if (inString) {
+        if (ch === '\\') i++;
+        else if (ch === '"') inString = false;
+      } else if (inChar) {
+        if (ch === '\\') i++;
+        else if (ch === "'") inChar = false;
+      } else {
+        if (ch === '/' && next === '/') {
+          inLineComment = true;
+          i++;
+        } else if (ch === '/' && next === '*') {
+          inBlockComment = true;
+          i++;
+        } else if (ch === '"') {
+          inString = true;
+        } else if (ch === "'") {
+          inChar = true;
+        } else if (ch === '{') {
+          depth++;
+        } else if (ch === '}') {
+          depth--;
+          if (depth === 0) {
+            funcs[fnName] = {
+              body: text.slice(bodyStart, i),
+              fnStartLine,
+              bodyStartLine,
+              fnEndLine: countNewlinesBefore(text, i) + 1
+            };
+            sigRe.lastIndex = i + 1;
+            break;
+          }
+        }
+      }
+      i++;
+    }
+  }
+  return funcs;
+}
+
+function extractTopLevelVoidFunctions(code) {
+  const withLines = extractTopLevelVoidFunctionsWithLines(code);
+  const out = {};
+  for (const [k, v] of Object.entries(withLines)) out[k] = v.body;
+  return out;
+}
+
+function buildMissionLineIndex(filename, code) {
+  const modeNum = filename.match(/RunMode(\d)/)?.[1] || '1';
+  const funcs = extractTopLevelVoidFunctionsWithLines(code);
+  const funcMapLower = {};
+  for (const [k, v] of Object.entries(funcs)) funcMapLower[k.toLowerCase()] = v;
+
+  const lineToBlock = new Map();
+  const blockToLine = new Map();
+  const sectionRanges = [];
+  const mainCallLineToSection = new Map();
+
+  const hasStructuredSections = MISSION_SECTIONS.some((sec) => {
+    const targetFn = getMissionSectionFnName(filename, sec.id);
+    return targetFn.toLowerCase() in funcMapLower;
+  });
+
+  let globalIdx = 0;
+  let cumLastBlockIdx = -1;
+
+  const indexFnBody = (fnInfo, sectionId, skipSectionCalls) => {
+    const bodyLines = String(fnInfo.body || '').split(/\r?\n/);
+    let stackIdx = 0;
+    let firstBlockIdx = -1;
+    let lastBlockIdx = -1;
+    for (let i = 0; i < bodyLines.length; i++) {
+      const trimmed = bodyLines[i].trim();
+      if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('extern ')) continue;
+      if (skipSectionCalls && /^(?:M[23]_)?(?:Box[1-4]|EndMission|Endmission)\s*\(\s*\)\s*;?$/i.test(trimmed)) {
+        continue;
+      }
+      const lineNum = fnInfo.bodyStartLine + i;
+      const gIdx = globalIdx++;
+      lineToBlock.set(lineNum, { globalBlockIdx: gIdx, sectionId, stackIdx });
+      blockToLine.set(gIdx, lineNum);
+      if (firstBlockIdx < 0) firstBlockIdx = gIdx;
+      lastBlockIdx = gIdx;
+      stackIdx++;
+    }
+    if (lastBlockIdx >= 0) cumLastBlockIdx = lastBlockIdx;
+    sectionRanges.push({
+      sectionId,
+      fnStartLine: fnInfo.fnStartLine,
+      fnEndLine: fnInfo.fnEndLine,
+      firstBlockIdx,
+      lastBlockIdx,
+      cumLastBlockIdx
+    });
+  };
+
+  if (hasStructuredSections) {
+    const mainInfo = funcMapLower[`runmode${modeNum}`];
+    if (mainInfo) {
+      const callNames = Object.fromEntries(
+        MISSION_SECTIONS.map((s) => [getMissionSectionFnName(filename, s.id).toLowerCase(), s.id])
+      );
+      const mainLines = String(mainInfo.body || '').split(/\r?\n/);
+      for (let i = 0; i < mainLines.length; i++) {
+        const m = mainLines[i].trim().match(/^([A-Za-z_]\w*)\s*\(\s*\)\s*;?$/);
+        if (m && callNames[m[1].toLowerCase()]) {
+          mainCallLineToSection.set(mainInfo.bodyStartLine + i, callNames[m[1].toLowerCase()]);
+        }
+      }
+    }
+
+    for (const sec of MISSION_SECTIONS) {
+      const fnInfo = funcMapLower[getMissionSectionFnName(filename, sec.id).toLowerCase()];
+      if (fnInfo) {
+        indexFnBody(fnInfo, sec.id, false);
+      } else {
+        sectionRanges.push({
+          sectionId: sec.id,
+          fnStartLine: -1,
+          fnEndLine: -1,
+          firstBlockIdx: -1,
+          lastBlockIdx: -1,
+          cumLastBlockIdx
+        });
+      }
+    }
+  } else {
+    const mainInfo = funcMapLower[`runmode${modeNum}`];
+    if (mainInfo) {
+      indexFnBody(mainInfo, 'Box1', true);
+    } else {
+      const allLines = String(code || '').split(/\r?\n/);
+      indexFnBody({ body: allLines.join('\n'), fnStartLine: 1, bodyStartLine: 1, fnEndLine: allLines.length }, 'Box1', true);
+    }
+  }
+
+  return { lineToBlock, blockToLine, sectionRanges, mainCallLineToSection };
+}
+
+function resolveBlockIndexForCodeLine(filename, code, lineNumber) {
+  const index = buildMissionLineIndex(filename, code);
+  const exact = index.lineToBlock.get(lineNumber);
+  if (exact) {
+    return { globalBlockIdx: exact.globalBlockIdx, matchedLine: lineNumber, mode: 'line', index };
+  }
+
+  const callSec = index.mainCallLineToSection.get(lineNumber);
+  if (callSec) {
+    const secRange = index.sectionRanges.find((r) => r.sectionId === callSec);
+    return {
+      globalBlockIdx: secRange ? secRange.cumLastBlockIdx : -1,
+      matchedLine: lineNumber,
+      mode: 'section-call',
+      index
+    };
+  }
+
+  for (let i = 0; i < index.sectionRanges.length; i++) {
+    const r = index.sectionRanges[i];
+    if (r.fnStartLine > 0 && lineNumber >= r.fnStartLine && lineNumber <= r.fnEndLine) {
+      let bestLine = -1;
+      let bestIdx = i > 0 ? index.sectionRanges[i - 1].cumLastBlockIdx : -1;
+      for (const [ln, info] of index.lineToBlock.entries()) {
+        if (ln >= r.fnStartLine && ln <= lineNumber && ln > bestLine) {
+          bestLine = ln;
+          bestIdx = info.globalBlockIdx;
+        }
+      }
+      return { globalBlockIdx: bestIdx, matchedLine: bestLine > 0 ? bestLine : lineNumber, mode: 'section-nearby', index };
+    }
+  }
+
+  const firstSecLine = index.sectionRanges.find((r) => r.fnStartLine > 0)?.fnStartLine ?? Infinity;
+  if (lineNumber < firstSecLine) {
+    return { globalBlockIdx: -1, matchedLine: lineNumber, mode: 'start', index };
+  }
+
+  let bestLine = -1;
+  let bestIdx = -1;
+  for (const [ln, info] of index.lineToBlock.entries()) {
+    if (ln <= lineNumber && ln > bestLine) {
+      bestLine = ln;
+      bestIdx = info.globalBlockIdx;
+    }
+  }
+  return { globalBlockIdx: bestIdx, matchedLine: bestLine > 0 ? bestLine : lineNumber, mode: 'after', index };
 }
 
 function parseLineToBlock(line) {
@@ -520,11 +814,19 @@ function parseLineToBlock(line) {
 
   if ((fn === 'SetF' || fn === 'SetFront_Yaw') && args.length === 1) return { type: 'SETF', params: { speed: parseArg(args[0], 25) } };
   if ((fn === 'SetF' || fn === 'SetFront_Yaw') && args.length === 2) return { type: 'SETF_BACK', params: { speed: parseArg(args[0], 25), cm: parseArg(args[1], 10) } };
-  if ((fn === 'SetF' || fn === 'SetFront_Yaw') && args.length === 3) return { type: 'SETF_DIR', params: { speed: parseArg(args[0], 25), cm: parseArg(args[1], 10), dir: parseArg(args[2], 'R') } };
+  if ((fn === 'SetF' || fn === 'SetFront_Yaw') && args.length === 3) {
+    const rawDir = parseArg(args[2], 'R');
+    const dir = rawDir === 'r' ? 'R' : rawDir === 'l' ? 'L' : rawDir;
+    return { type: 'SETF_DIR', params: { speed: parseArg(args[0], 25), cm: parseArg(args[1], 10), dir } };
+  }
 
   if ((fn === 'SetB' || fn === 'SetBack_Yaw') && args.length === 1) return { type: 'SETB', params: { speed: parseArg(args[0], 25) } };
   if ((fn === 'SetB' || fn === 'SetBack_Yaw') && args.length === 2) return { type: 'SETB_FWD', params: { speed: parseArg(args[0], 25), cm: parseArg(args[1], 10) } };
-  if ((fn === 'SetB' || fn === 'SetBack_Yaw') && args.length === 3) return { type: 'SETB_DIR', params: { speed: parseArg(args[0], 25), cm: parseArg(args[1], 10), dir: parseArg(args[2], 'L') } };
+  if ((fn === 'SetB' || fn === 'SetBack_Yaw') && args.length === 3) {
+    const rawDir = parseArg(args[2], 'L');
+    const dir = rawDir === 'r' ? 'R' : rawDir === 'l' ? 'L' : rawDir;
+    return { type: 'SETB_DIR', params: { speed: parseArg(args[0], 25), cm: parseArg(args[1], 10), dir } };
+  }
 
   if (fn === 'DropF' && args.length === 0) return { type: 'DROPF', params: {} };
   if (fn === 'DropF' && args.length === 1) return { type: 'DROPF_SPD', params: { speed: parseArg(args[0], 30) } };
@@ -537,16 +839,47 @@ function parseLineToBlock(line) {
   return { type: 'RAW', params: { raw: line } };
 }
 
-function parseMissionFile(filename) {
-  const code = state.files[filename] || '';
-  const body = extractMissionBody(code);
+function parseBodyLinesToBlocks(bodyText, skipSectionCalls = false) {
   const blocks = [];
-  for (const rawLine of body.split(/\r?\n/)) {
+  for (const rawLine of String(bodyText || '').split(/\r?\n/)) {
     const trimmed = rawLine.trim();
     if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('extern ')) continue;
+    if (skipSectionCalls && /^(?:M[23]_)?(?:Box[1-4]|EndMission|Endmission)\s*\(\s*\)\s*;?$/i.test(trimmed)) {
+      continue;
+    }
     blocks.push({ id: state.nextBlockId++, ...parseLineToBlock(trimmed) });
   }
-  state.missions[filename].blocks = blocks;
+  return blocks;
+}
+
+function parseMissionFile(filename) {
+  const code = state.files[filename] || '';
+  const modeNum = filename.match(/RunMode(\d)/)?.[1] || '1';
+  const funcs = extractTopLevelVoidFunctions(code);
+  const funcMapLower = {};
+  for (const [k, v] of Object.entries(funcs)) {
+    funcMapLower[k.toLowerCase()] = v;
+  }
+
+  const hasStructuredSections = MISSION_SECTIONS.some((sec) => {
+    const targetFn = getMissionSectionFnName(filename, sec.id);
+    return targetFn.toLowerCase() in funcMapLower;
+  });
+
+  const sections = createEmptyMissionSections();
+  if (hasStructuredSections) {
+    for (const sec of MISSION_SECTIONS) {
+      const targetFn = getMissionSectionFnName(filename, sec.id);
+      const body = funcMapLower[targetFn.toLowerCase()] ?? '';
+      sections[sec.id] = parseBodyLinesToBlocks(body, false);
+    }
+  } else {
+    const runBody = funcMapLower[`runmode${modeNum}`] ?? code;
+    sections.Box1 = parseBodyLinesToBlocks(runBody, true);
+  }
+
+  const m = ensureMissionStructure(state.missions[filename]);
+  if (m) m.sections = sections;
 }
 
 function parseAllMissionsFromFiles() {
@@ -554,16 +887,27 @@ function parseAllMissionsFromFiles() {
   for (const def of MISSION_DEFS) parseMissionFile(def.file);
 }
 
-function blocksToMissionCode(filename, blocks) {
+function blocksToMissionCode(filename, missionOrSections) {
   const modeNum = filename.match(/RunMode(\d)/)?.[1] || '1';
   const externLines = state.variables.map((v) => `extern ${v.type} ${v.name};`);
-  const lines = blocks
-    .map((b) => {
-      const def = DEF_MAP[b.type];
-      return def ? def.toCode(b.params) : String(b.params.raw || '');
-    })
-    .filter(Boolean)
-    .map((line) => `    ${line}`);
+  const sections = missionOrSections && typeof missionOrSections === 'object' && !Array.isArray(missionOrSections)
+    ? (missionOrSections.sections || missionOrSections)
+    : { ...createEmptyMissionSections(), Box1: Array.isArray(missionOrSections) ? missionOrSections : [] };
+
+  const mainCalls = MISSION_SECTIONS.map((sec) => `    ${getMissionSectionFnName(filename, sec.id)}();`);
+  const subFnBlocks = [];
+  for (const sec of MISSION_SECTIONS) {
+    const fnName = getMissionSectionFnName(filename, sec.id);
+    const secBlocks = Array.isArray(sections[sec.id]) ? sections[sec.id] : [];
+    const lines = secBlocks
+      .map((b) => {
+        const def = DEF_MAP[b.type];
+        return def ? def.toCode(b.params) : String(b.params.raw || '');
+      })
+      .filter(Boolean)
+      .map((line) => `    ${line}`);
+    subFnBlocks.push('', `void ${fnName}() {`, ...lines, '}');
+  }
 
   return [
     '// ============================================================================',
@@ -572,19 +916,20 @@ function blocksToMissionCode(filename, blocks) {
     ...(externLines.length > 0 ? ['', ...externLines] : []),
     '',
     `void runMode${modeNum}() {`,
-    ...lines,
+    ...mainCalls,
     '}',
+    ...subFnBlocks,
     ''
   ].join('\n');
 }
 
 function syncMissionToFile(filename, recordUndo = true) {
-  const m = state.missions[filename];
+  const m = ensureMissionStructure(state.missions[filename]);
   if (!m) return;
-  const code = blocksToMissionCode(filename, m.blocks);
+  const code = blocksToMissionCode(filename, m.sections);
   state.files[filename] = code;
   if (filename === state.activeMissionFile) {
-    if ($('visualCodePreview')) $('visualCodePreview').textContent = code;
+    renderVisualCodePreview(code, filename);
     updateMissionChrome();
     rebuildSimAndDraw(false);
   }
@@ -597,8 +942,80 @@ function syncMissionToFile(filename, recordUndo = true) {
 }
 
 // ============================================================================
-// Block Undo / Redo & Freeform Layout Persistence
+// Floating Loose-Stack Helpers & Block Undo / Redo Persistence
 // ============================================================================
+function allocateTopLooseZ() {
+  if (state.nextLooseZ >= 5000) {
+    const sorted = [...state.looseBlocks].sort((a, b) => (a.z || 30) - (b.z || 30));
+    sorted.forEach((s, idx) => { s.z = 30 + idx; });
+    state.nextLooseZ = 30 + sorted.length;
+  }
+  return ++state.nextLooseZ;
+}
+
+function cloneBlockForDuplicate(blk) {
+  return {
+    id: state.nextBlockId++,
+    type: blk.type,
+    params: JSON.parse(JSON.stringify(blk.params || {}))
+  };
+}
+
+function normalizeLooseStacks(rawList) {
+  if (!Array.isArray(rawList)) return [];
+  const out = [];
+  for (const item of rawList) {
+    if (!item || typeof item !== 'object') continue;
+    const x = Number.isFinite(Number(item.x)) ? Number(item.x) : 60;
+    const y = Number.isFinite(Number(item.y)) ? Number(item.y) : 400;
+    const z = Math.max(30, Number.isFinite(Number(item.z)) ? Number(item.z) : 30);
+    state.nextLooseZ = Math.max(state.nextLooseZ, z);
+
+    let blocks = [];
+    if (Array.isArray(item.blocks)) {
+      blocks = item.blocks
+        .filter((b) => b && b.type)
+        .map((b) => cloneBlockForDuplicate(b));
+    } else if (item.type) {
+      blocks = [cloneBlockForDuplicate(item)];
+    }
+    if (blocks.length === 0) continue;
+    out.push({ id: state.nextBlockId++, x, y, z, blocks });
+  }
+  return out;
+}
+
+function spawnDuplicatedLooseStack(blocksToCopy, canvasPt) {
+  const cloned = (blocksToCopy || [])
+    .filter((b) => b && b.type)
+    .map((b) => cloneBlockForDuplicate(b));
+  if (cloned.length === 0) return;
+
+  let x = Math.max(12, Math.round((canvasPt?.x ?? 80) - 28));
+  let y = Math.max(12, Math.round((canvasPt?.y ?? 80) - 16));
+  for (let step = 0; step < 10; step++) {
+    const overlaps = state.looseBlocks.some(
+      (s) => Math.abs((s.x ?? 0) - x) < 14 && Math.abs((s.y ?? 0) - y) < 14
+    );
+    if (!overlaps) break;
+    x += 18;
+    y += 18;
+  }
+
+  const stack = {
+    id: state.nextBlockId++,
+    x,
+    y,
+    z: allocateTopLooseZ(),
+    blocks: cloned
+  };
+  state.looseBlocks.push(stack);
+  state.lastDuplicatedStackId = stack.id;
+  renderCanvas();
+  saveCanvasLayout();
+  pushBlockSnapshot();
+}
+
 function getBlockSnapshotPayload() {
   return {
     v: JSON.parse(JSON.stringify(state.variables)),
@@ -628,10 +1045,10 @@ function applyBlockSnapshot(rawSnap) {
   }
   if (rawSnap.m) {
     for (const d of MISSION_DEFS) {
-      if (rawSnap.m[d.file]) state.missions[d.file] = rawSnap.m[d.file];
+      if (rawSnap.m[d.file]) state.missions[d.file] = ensureMissionStructure(rawSnap.m[d.file]);
     }
   }
-  if (Array.isArray(rawSnap.l)) state.looseBlocks = rawSnap.l;
+  if (Array.isArray(rawSnap.l)) state.looseBlocks = normalizeLooseStacks(rawSnap.l);
   for (const d of MISSION_DEFS) syncMissionToFile(d.file, false);
   renderPalette();
   renderCanvas();
@@ -680,8 +1097,15 @@ function saveCanvasLayout() {
       activeMissionFile: state.activeMissionFile,
       zoomPct: state.zoomPct,
       missions: Object.fromEntries(MISSION_DEFS.map((d) => {
-        const m = state.missions[d.file];
-        return [d.file, { placed: !!m.placed, x: Math.round(m.x), y: Math.round(m.y), folded: !!m.folded }];
+        const m = ensureMissionStructure(state.missions[d.file]);
+        return [d.file, {
+          placed: !!m.placed,
+          x: Math.round(m.x),
+          y: Math.round(m.y),
+          folded: !!m.folded,
+          activeSection: m.activeSection || 'Box1',
+          foldedSections: m.foldedSections || {}
+        }];
       })),
       looseBlocks: state.looseBlocks
     };
@@ -701,37 +1125,37 @@ function loadCanvasLayout() {
     if (saved.missions) {
       for (const def of MISSION_DEFS) {
         const sm = saved.missions[def.file];
-        if (sm) {
-          state.missions[def.file].placed = !!sm.placed;
-          state.missions[def.file].folded = !!sm.folded;
-          if (Number.isFinite(sm.x)) state.missions[def.file].x = sm.x;
-          if (Number.isFinite(sm.y)) state.missions[def.file].y = sm.y;
+        const m = ensureMissionStructure(state.missions[def.file]);
+        if (sm && m) {
+          m.placed = !!sm.placed;
+          m.folded = !!sm.folded;
+          if (Number.isFinite(sm.x)) m.x = sm.x;
+          if (Number.isFinite(sm.y)) m.y = sm.y;
+          if (sm.activeSection && MISSION_SECTIONS.some((s) => s.id === sm.activeSection)) {
+            m.activeSection = sm.activeSection;
+          }
+          if (sm.foldedSections && typeof sm.foldedSections === 'object') {
+            m.foldedSections = { ...sm.foldedSections };
+          }
         }
       }
     }
     if (Array.isArray(saved.looseBlocks)) {
-      state.looseBlocks = saved.looseBlocks.map((b) => ({
-        id: state.nextBlockId++,
-        type: b.type,
-        params: b.params || {},
-        x: Number(b.x) || 60,
-        y: Number(b.y) || 400
-      }));
+      state.looseBlocks = normalizeLooseStacks(saved.looseBlocks);
     }
     ensureNonOverlappingMissions();
   } catch (_) {}
 }
 
-function setActiveMission(filename) {
+function setActiveMission(filename, rebuildReset = true) {
   if (!state.missions[filename]) return;
+  const m = ensureMissionStructure(state.missions[filename]);
   state.activeMissionFile = filename;
   if (state.mode === 'visual') updateDocumentTitle();
-  if ($('visualCodePreview')) {
-    $('visualCodePreview').textContent = state.files[filename] || blocksToMissionCode(filename, state.missions[filename].blocks);
-  }
+  renderVisualCodePreview(state.files[filename] || blocksToMissionCode(filename, m.sections), filename);
   updateMissionChrome();
   renderCanvas();
-  rebuildSimAndDraw(true);
+  if (rebuildReset) rebuildSimAndDraw(true);
   saveCanvasLayout();
 }
 
@@ -756,7 +1180,7 @@ function renderMissionQuickBar() {
 
 function updateMissionChrome() {
   const m = state.missions[state.activeMissionFile];
-  const count = m ? m.blocks.length : 0;
+  const count = getMissionTotalCount(m);
   if ($('canvasMissionTitle')) $('canvasMissionTitle').textContent = state.activeMissionFile;
   if ($('previewFilename')) $('previewFilename').textContent = state.activeMissionFile;
   if ($('blockCountBadge')) $('blockCountBadge').textContent = `${count} blocks`;
@@ -779,8 +1203,12 @@ const dragCtx = {
   reporterAst: null,
   clearSourceFn: null,
   missionFile: null,
+  sectionId: null,
   blockIndex: -1,
   looseIndex: -1,
+  looseBlockIndex: -1,
+  grabOffsetX: 40,
+  grabOffsetY: 20,
   missionEl: null,
   originX: 0,
   originY: 0,
@@ -813,7 +1241,24 @@ function findClosestDropSlot(clientX, clientY) {
   let best = null;
   let bestDist = 48;
   for (const slot of slots) {
+    if (dragCtx.kind === 'stack-cmd') {
+      if (
+        slot.dataset.mission === dragCtx.missionFile &&
+        (slot.dataset.section || 'Box1') === (dragCtx.sectionId || 'Box1') &&
+        parseInt(slot.dataset.insertIdx, 10) > dragCtx.blockIndex
+      ) {
+        continue;
+      }
+    } else if (dragCtx.kind === 'loose-cmd' && slot.dataset.looseIdx !== undefined) {
+      if (
+        parseInt(slot.dataset.looseIdx, 10) === dragCtx.looseIndex &&
+        (dragCtx.looseBlockIndex === 0 || parseInt(slot.dataset.insertIdx, 10) >= dragCtx.looseBlockIndex)
+      ) {
+        continue;
+      }
+    }
     const r = slot.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) continue;
     const cx = Math.max(r.left, Math.min(clientX, r.right));
     const cy = (r.top + r.bottom) * 0.5;
     const dist = Math.hypot(clientX - cx, clientY - cy);
@@ -833,6 +1278,7 @@ function findClosestParamSlot(clientX, clientY) {
   for (const slot of all) {
     if (slot.closest('.drag-ghost')) continue;
     const r = slot.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) continue;
     const inside = clientX >= r.left - 8 && clientX <= r.right + 8 && clientY >= r.top - 8 && clientY <= r.bottom + 8;
     const cx = Math.max(r.left, Math.min(clientX, r.right));
     const cy = Math.max(r.top, Math.min(clientY, r.bottom));
@@ -869,6 +1315,44 @@ function spawnBlockGhost(title, colorBg, colorDark, clientX, clientY, sub = '', 
   return el;
 }
 
+function spawnStackGhost(blocks, clientX, clientY, grabOffX = 40, grabOffY = 20) {
+  const wrap = document.createElement('div');
+  wrap.className = 'drag-ghost-stack';
+  const previewLimit = 6;
+  const preview = (blocks || []).slice(0, previewLimit);
+  for (const b of preview) {
+    const def = DEF_MAP[b.type] || DEF_MAP.RAW;
+    const c = CAT_COLORS[def.cat] || CAT_COLORS.enc;
+    const row = document.createElement('div');
+    row.className = 'mc-block';
+    row.style.setProperty('--blk-bg', c.bg);
+    row.style.setProperty('--blk-dark', c.dark);
+    row.innerHTML = `
+      <span class="mc-grip">${svgIcon('grip', 'sm')}</span>
+      <span class="mc-label">${escapeHtml(def.title)}</span>
+      <span class="hat-pill">${escapeHtml(def.toCode(b.params))}</span>
+    `;
+    wrap.appendChild(row);
+  }
+  if ((blocks?.length || 0) > previewLimit) {
+    const more = document.createElement('div');
+    more.className = 'drag-ghost-more';
+    more.textContent = `+${blocks.length - previewLimit} บล็อก`;
+    wrap.appendChild(more);
+  }
+  if ((blocks?.length || 0) > 1) {
+    const badge = document.createElement('span');
+    badge.className = 'drag-ghost-count';
+    badge.textContent = `${blocks.length} บล็อก`;
+    wrap.appendChild(badge);
+  }
+  const scale = state.zoomPct / 100;
+  document.body.appendChild(wrap);
+  wrap.style.left = `${clientX - grabOffX * scale}px`;
+  wrap.style.top = `${clientY - grabOffY * scale}px`;
+  return wrap;
+}
+
 function onGlobalPointerMove(e) {
   if (!dragCtx.active) return;
   const dx = e.clientX - dragCtx.startX;
@@ -883,14 +1367,20 @@ function onGlobalPointerMove(e) {
     } else if (dragCtx.kind === 'canvas-mission') {
       trash.classList.add('visible');
     } else if (dragCtx.kind === 'palette-mission') {
+      dragCtx.grabOffsetX = 40;
+      dragCtx.grabOffsetY = 20;
       const mDef = MISSION_MAP[dragCtx.missionFile];
       dragCtx.ghostEl = spawnBlockGhost(mDef.title, mDef.bg, mDef.dark, e.clientX, e.clientY, mDef.fn);
     } else if (dragCtx.kind === 'palette-cmd') {
+      dragCtx.grabOffsetX = 40;
+      dragCtx.grabOffsetY = 20;
       const def = DEF_MAP[dragCtx.defType];
       const c = CAT_COLORS[def.cat] || CAT_COLORS.enc;
       dragCtx.ghostEl = spawnBlockGhost(def.title, c.bg, c.dark, e.clientX, e.clientY, def.sig);
       trash.classList.add('visible');
     } else if (dragCtx.kind === 'palette-reporter') {
+      dragCtx.grabOffsetX = 40;
+      dragCtx.grabOffsetY = 20;
       if (dragCtx.reporterOp === 'VAR') {
         dragCtx.ghostEl = spawnBlockGhost(dragCtx.reporterVarName, CAT_COLORS.vars.bg, CAT_COLORS.vars.dark, e.clientX, e.clientY, 'var', true);
       } else {
@@ -900,22 +1390,43 @@ function onGlobalPointerMove(e) {
       }
       trash.classList.add('visible');
     } else if (dragCtx.kind === 'move-reporter') {
+      dragCtx.grabOffsetX = 40;
+      dragCtx.grabOffsetY = 20;
       const ast = dragCtx.reporterAst;
       const cat = ast?.kind === 'var' ? 'vars' : (REPORTER_MAP[ast?.op]?.cat || 'math');
       const c = CAT_COLORS[cat] || CAT_COLORS.math;
       dragCtx.ghostEl = spawnBlockGhost(exprToCode(ast, 'raw'), c.bg, c.dark, e.clientX, e.clientY, '', true);
       trash.classList.add('visible');
     } else if (dragCtx.kind === 'stack-cmd') {
-      const b = state.missions[dragCtx.missionFile].blocks[dragCtx.blockIndex];
-      const def = DEF_MAP[b.type] || DEF_MAP.RAW;
-      const c = CAT_COLORS[def.cat] || CAT_COLORS.enc;
-      dragCtx.ghostEl = spawnBlockGhost(def.title, c.bg, c.dark, e.clientX, e.clientY, def.toCode(b.params));
+      const m = ensureMissionStructure(state.missions[dragCtx.missionFile]);
+      const secBlocks = m?.sections?.[dragCtx.sectionId || 'Box1'] || [];
+      const tail = secBlocks.slice(dragCtx.blockIndex);
+      if (tail.length === 0) return;
+      dragCtx.ghostEl = spawnStackGhost(tail, e.clientX, e.clientY, dragCtx.grabOffsetX, dragCtx.grabOffsetY);
+      document.querySelectorAll('.mc-block[data-mission]').forEach((el) => {
+        if (
+          el.dataset.mission === dragCtx.missionFile &&
+          (el.dataset.section || 'Box1') === (dragCtx.sectionId || 'Box1') &&
+          parseInt(el.dataset.stackIdx, 10) >= dragCtx.blockIndex
+        ) {
+          el.classList.add('dragging-source');
+        }
+      });
       trash.classList.add('visible');
     } else if (dragCtx.kind === 'loose-cmd') {
-      const b = state.looseBlocks[dragCtx.looseIndex];
-      const def = DEF_MAP[b.type] || DEF_MAP.RAW;
-      const c = CAT_COLORS[def.cat] || CAT_COLORS.enc;
-      dragCtx.ghostEl = spawnBlockGhost(def.title, c.bg, c.dark, e.clientX, e.clientY, def.toCode(b.params));
+      const stack = state.looseBlocks[dragCtx.looseIndex];
+      const subIdx = Math.max(0, dragCtx.looseBlockIndex || 0);
+      const tail = stack?.blocks ? stack.blocks.slice(subIdx) : [];
+      if (tail.length === 0) return;
+      dragCtx.ghostEl = spawnStackGhost(tail, e.clientX, e.clientY, dragCtx.grabOffsetX, dragCtx.grabOffsetY);
+      document.querySelectorAll('.mc-block.loose-block').forEach((el) => {
+        if (
+          parseInt(el.dataset.looseIdx, 10) === dragCtx.looseIndex &&
+          parseInt(el.dataset.looseBlockIdx, 10) >= subIdx
+        ) {
+          el.classList.add('dragging-source');
+        }
+      });
       trash.classList.add('visible');
     }
   }
@@ -940,8 +1451,9 @@ function onGlobalPointerMove(e) {
   }
 
   if (dragCtx.ghostEl) {
-    dragCtx.ghostEl.style.left = `${e.clientX - 40}px`;
-    dragCtx.ghostEl.style.top = `${e.clientY - 20}px`;
+    const scale = state.zoomPct / 100;
+    dragCtx.ghostEl.style.left = `${e.clientX - dragCtx.grabOffsetX * scale}px`;
+    dragCtx.ghostEl.style.top = `${e.clientY - dragCtx.grabOffsetY * scale}px`;
   }
 
   const trash = $('trashDropzone');
@@ -968,6 +1480,27 @@ function insertReporterIntoFocusedOrHoveredSlot(slotEl, node) {
   return true;
 }
 
+function dropBlocksIntoHoveredSlot(slot, movedBlocks) {
+  if (!slot || !Array.isArray(movedBlocks) || movedBlocks.length === 0) return;
+  const tIdx = Math.max(0, parseInt(slot.dataset.insertIdx, 10) || 0);
+  if (slot.dataset.looseIdx !== undefined) {
+    const targetStack = state.looseBlocks[parseInt(slot.dataset.looseIdx, 10)];
+    if (!targetStack) return;
+    targetStack.blocks.splice(Math.min(tIdx, targetStack.blocks.length), 0, ...movedBlocks);
+    targetStack.z = allocateTopLooseZ();
+    return;
+  }
+  const tFile = slot.dataset.mission;
+  const tSec = slot.dataset.section || 'Box1';
+  const tm = ensureMissionStructure(state.missions[tFile]);
+  if (!tm) return;
+  tm.sections[tSec].splice(Math.min(tIdx, tm.sections[tSec].length), 0, ...movedBlocks);
+  tm.activeSection = tSec;
+  state.activeMissionFile = tFile;
+  syncMissionToFile(tFile, false);
+  updateDocumentTitle();
+}
+
 function onGlobalPointerUp(e) {
   if (!dragCtx.active) return;
   const wasMoved = dragCtx.moved;
@@ -978,6 +1511,7 @@ function onGlobalPointerUp(e) {
   $('trashDropzone')?.classList.remove('visible', 'drag-over');
   document.querySelectorAll('.drop-slot.active-hover').forEach((s) => s.classList.remove('active-hover'));
   document.querySelectorAll('.mc-param-slot.slot-drop-hover').forEach((s) => s.classList.remove('slot-drop-hover'));
+  document.querySelectorAll('.mc-block.dragging-source').forEach((el) => el.classList.remove('dragging-source'));
 
   if (!wasMoved) {
     if (kind === 'palette-mission') {
@@ -995,6 +1529,15 @@ function onGlobalPointerUp(e) {
       }
     } else if (kind === 'canvas-mission') {
       setActiveMission(dragCtx.missionFile);
+    } else if (kind === 'stack-cmd') {
+      if (isClickToSeekSimEnabled()) {
+        seekSimulationToSectionBlock(dragCtx.missionFile, dragCtx.sectionId, dragCtx.blockIndex);
+      }
+    } else if (kind === 'move-reporter') {
+      const blkEl = e.target?.closest?.('.mc-block[data-mission]');
+      if (blkEl && isClickToSeekSimEnabled()) {
+        seekSimulationToSectionBlock(blkEl.dataset.mission, blkEl.dataset.section, parseInt(blkEl.dataset.stackIdx, 10));
+      }
     }
   } else {
     const canvas = $('blockCanvas');
@@ -1034,14 +1577,15 @@ function onGlobalPointerUp(e) {
           newBlock.params.value = state.variables[0].value;
         }
         if (dragCtx.hoveredSlot) {
-          const tFile = dragCtx.hoveredSlot.dataset.mission;
-          const tIdx = parseInt(dragCtx.hoveredSlot.dataset.insertIdx, 10);
-          state.missions[tFile].blocks.splice(tIdx, 0, newBlock);
-          state.activeMissionFile = tFile;
-          syncMissionToFile(tFile, false);
-          updateDocumentTitle();
+          dropBlocksIntoHoveredSlot(dragCtx.hoveredSlot, [newBlock]);
         } else if (overCanvas) {
-          state.looseBlocks.push({ ...newBlock, x: Math.max(12, Math.round(pt.x - 100)), y: Math.max(12, Math.round(pt.y - 20)) });
+          state.looseBlocks.push({
+            id: state.nextBlockId++,
+            x: Math.max(12, Math.round(pt.x - dragCtx.grabOffsetX)),
+            y: Math.max(12, Math.round(pt.y - dragCtx.grabOffsetY)),
+            z: allocateTopLooseZ(),
+            blocks: [newBlock]
+          });
         }
         renderCanvas();
         saveCanvasLayout();
@@ -1049,26 +1593,30 @@ function onGlobalPointerUp(e) {
       }
     } else if (kind === 'stack-cmd') {
       const srcFile = dragCtx.missionFile;
+      const srcSec = dragCtx.sectionId || 'Box1';
       const srcIdx = dragCtx.blockIndex;
-      const srcBlocks = state.missions[srcFile].blocks;
+      const srcMission = ensureMissionStructure(state.missions[srcFile]);
+      const srcBlocks = srcMission?.sections?.[srcSec] || [];
       if (srcIdx >= 0 && srcIdx < srcBlocks.length) {
         if (dragCtx.overTrash) {
-          srcBlocks.splice(srcIdx, 1);
+          srcBlocks.splice(srcIdx);
           syncMissionToFile(srcFile, false);
         } else if (dragCtx.hoveredSlot) {
-          const tFile = dragCtx.hoveredSlot.dataset.mission;
-          let tIdx = parseInt(dragCtx.hoveredSlot.dataset.insertIdx, 10);
-          const [movedBlock] = srcBlocks.splice(srcIdx, 1);
-          if (srcFile === tFile && srcIdx < tIdx) tIdx--;
-          state.missions[tFile].blocks.splice(Math.max(0, tIdx), 0, movedBlock);
-          state.activeMissionFile = tFile;
-          syncMissionToFile(srcFile, false);
-          if (tFile !== srcFile) syncMissionToFile(tFile, false);
-          updateDocumentTitle();
+          const movedBlocks = srcBlocks.splice(srcIdx);
+          dropBlocksIntoHoveredSlot(dragCtx.hoveredSlot, movedBlocks);
+          if (dragCtx.hoveredSlot.dataset.mission !== srcFile) {
+            syncMissionToFile(srcFile, false);
+          }
         } else if (overCanvas) {
-          const [movedBlock] = srcBlocks.splice(srcIdx, 1);
+          const movedBlocks = srcBlocks.splice(srcIdx);
           syncMissionToFile(srcFile, false);
-          state.looseBlocks.push({ ...movedBlock, x: Math.max(12, Math.round(pt.x - 100)), y: Math.max(12, Math.round(pt.y - 20)) });
+          state.looseBlocks.push({
+            id: state.nextBlockId++,
+            x: Math.max(12, Math.round(pt.x - dragCtx.grabOffsetX)),
+            y: Math.max(12, Math.round(pt.y - dragCtx.grabOffsetY)),
+            z: allocateTopLooseZ(),
+            blocks: movedBlocks
+          });
         }
         renderCanvas();
         saveCanvasLayout();
@@ -1076,22 +1624,45 @@ function onGlobalPointerUp(e) {
       }
     } else if (kind === 'loose-cmd') {
       const lIdx = dragCtx.looseIndex;
-      if (lIdx >= 0 && lIdx < state.looseBlocks.length) {
+      const subIdx = Math.max(0, dragCtx.looseBlockIndex || 0);
+      const srcStack = state.looseBlocks[lIdx];
+      if (srcStack && Array.isArray(srcStack.blocks) && subIdx < srcStack.blocks.length) {
+        const targetStackObj =
+          dragCtx.hoveredSlot?.dataset?.looseIdx !== undefined
+            ? state.looseBlocks[parseInt(dragCtx.hoveredSlot.dataset.looseIdx, 10)]
+            : null;
         if (dragCtx.overTrash) {
-          state.looseBlocks.splice(lIdx, 1);
+          if (subIdx === 0) state.looseBlocks.splice(lIdx, 1);
+          else srcStack.blocks.splice(subIdx);
         } else if (dragCtx.hoveredSlot) {
-          const tFile = dragCtx.hoveredSlot.dataset.mission;
-          const tIdx = parseInt(dragCtx.hoveredSlot.dataset.insertIdx, 10);
-          const [movedBlock] = state.looseBlocks.splice(lIdx, 1);
-          delete movedBlock.x;
-          delete movedBlock.y;
-          state.missions[tFile].blocks.splice(tIdx, 0, movedBlock);
-          state.activeMissionFile = tFile;
-          syncMissionToFile(tFile, false);
-          updateDocumentTitle();
+          const movedBlocks =
+            subIdx === 0
+              ? state.looseBlocks.splice(lIdx, 1)[0].blocks
+              : srcStack.blocks.splice(subIdx);
+          if (targetStackObj) {
+            const tIdx = Math.max(0, parseInt(dragCtx.hoveredSlot.dataset.insertIdx, 10) || 0);
+            targetStackObj.blocks.splice(Math.min(tIdx, targetStackObj.blocks.length), 0, ...movedBlocks);
+            targetStackObj.z = allocateTopLooseZ();
+          } else {
+            dropBlocksIntoHoveredSlot(dragCtx.hoveredSlot, movedBlocks);
+          }
         } else if (overCanvas) {
-          state.looseBlocks[lIdx].x = Math.max(12, Math.round(pt.x - 100));
-          state.looseBlocks[lIdx].y = Math.max(12, Math.round(pt.y - 20));
+          const nx = Math.max(12, Math.round(pt.x - dragCtx.grabOffsetX));
+          const ny = Math.max(12, Math.round(pt.y - dragCtx.grabOffsetY));
+          if (subIdx === 0) {
+            srcStack.x = nx;
+            srcStack.y = ny;
+            srcStack.z = allocateTopLooseZ();
+          } else {
+            const movedBlocks = srcStack.blocks.splice(subIdx);
+            state.looseBlocks.push({
+              id: state.nextBlockId++,
+              x: nx,
+              y: ny,
+              z: allocateTopLooseZ(),
+              blocks: movedBlocks
+            });
+          }
         }
         renderCanvas();
         saveCanvasLayout();
@@ -1106,6 +1677,11 @@ function onGlobalPointerUp(e) {
   dragCtx.hoveredParamSlot = null;
   dragCtx.overTrash = false;
   dragCtx.missionEl = null;
+  dragCtx.sectionId = null;
+  dragCtx.looseIndex = -1;
+  dragCtx.looseBlockIndex = -1;
+  dragCtx.grabOffsetX = 40;
+  dragCtx.grabOffsetY = 20;
   dragCtx.reporterAst = null;
   dragCtx.clearSourceFn = null;
 }
@@ -1155,13 +1731,15 @@ function appendBlockToActiveMission(defType, overrides = {}) {
     if (firstPlaced) state.activeMissionFile = firstPlaced.file;
     else state.missions[state.activeMissionFile].placed = true;
   }
-  const m = state.missions[state.activeMissionFile];
+  const m = ensureMissionStructure(state.missions[state.activeMissionFile]);
+  const secId = m.activeSection || 'Box1';
+  m.foldedSections[secId] = false;
   const params = { ...JSON.parse(JSON.stringify(def.defaults)), ...overrides };
   if (def.type === 'SET_VAR' && !overrides.name && state.variables.length > 0) {
     params.name = state.variables[0].name;
     params.value = state.variables[0].value;
   }
-  m.blocks.push({ id: state.nextBlockId++, type: def.type, params });
+  m.sections[secId].push({ id: state.nextBlockId++, type: def.type, params });
   renderPalette();
   renderCanvas();
   syncMissionToFile(state.activeMissionFile);
@@ -1639,7 +2217,7 @@ function buildFieldControl(field, block, def, onUpdate) {
       ? [['R', "'R' Swing+45° (เลี้ยวไม่หยุด)"], ['L', "'L' Swing-45° (เลี้ยวไม่หยุด)"], ['r', "'r' Spin+45° (หยุดหมุน)"], ['l', "'l' Spin-45° (หยุดหมุน)"]]
       : field.type === 'dir45'
       ? [['R', "'R' +90°"], ['L', "'L' -90°"], ['r', "'r' +45°"], ['l', "'l' -45°"]]
-      : [['R', "'R' Spin+90° (หยุดหมุน)"], ['L', "'L' Spin-90° (หยุดหมุน)"], ['r', "'r' Swing+90° (เลี้ยวไม่หยุด)"], ['l', "'l' Swing-90° (เลี้ยวไม่หยุด)"]];
+      : [['R', "'R' Spin+90° (หมุนขวา)"], ['L', "'L' Spin-90° (หมุนซ้าย)"]];
     for (const [v, t] of opts) {
       const o = document.createElement('option');
       o.value = v;
@@ -1711,6 +2289,7 @@ function closeBlockContextMenu() {
 
 function showBlockContextMenu(clientX, clientY, opts) {
   closeBlockContextMenu();
+  const canvasPt = clientToCanvasCoords(clientX, clientY);
   const menu = document.createElement('div');
   menu.className = 'block-context-menu';
 
@@ -1728,7 +2307,17 @@ function showBlockContextMenu(clientX, clientY, opts) {
   };
 
   if (typeof opts.onDuplicate === 'function') {
-    menu.appendChild(makeItem('ทำซ้ำ (Duplicate)', 'copy', false, opts.onDuplicate));
+    menu.appendChild(makeItem('ทำซ้ำ (Duplicate)', 'copy', false, () => opts.onDuplicate(canvasPt)));
+  }
+  if (typeof opts.onDuplicateStack === 'function' && (opts.stackTailCount || 0) > 1) {
+    menu.appendChild(
+      makeItem(
+        `ทำซ้ำพร้อมชุดด้านล่าง (${opts.stackTailCount} บล็อก)`,
+        'copy',
+        false,
+        () => opts.onDuplicateStack(canvasPt)
+      )
+    );
   }
   if (typeof opts.onDelete === 'function') {
     menu.appendChild(makeItem('ลบ (Delete)', 'close', true, opts.onDelete));
@@ -1760,6 +2349,19 @@ function buildBlockElement(block, opts) {
   el.className = `mc-block${opts.loose ? ' loose-block' : ''}${opts.simActive ? ' sim-active' : ''}`;
   el.style.setProperty('--blk-bg', colors.bg);
   el.style.setProperty('--blk-dark', colors.dark);
+  if (opts.loose) {
+    el.dataset.looseIdx = String(opts.looseIdx ?? 0);
+    el.dataset.looseBlockIdx = String(opts.looseBlockIdx ?? 0);
+  } else if (opts.missionFile) {
+    el.dataset.mission = opts.missionFile;
+    el.dataset.section = opts.sectionId || 'Box1';
+    el.dataset.stackIdx = String(opts.stackIdx ?? 0);
+    el.dataset.globalIdx = String(opts.globalIdx ?? -1);
+    el.addEventListener('focusin', (e) => {
+      if (e.target.closest('.mc-delete-btn') || !isClickToSeekSimEnabled()) return;
+      seekSimulationToSectionBlock(opts.missionFile, opts.sectionId || 'Box1', opts.stackIdx ?? 0);
+    });
+  }
 
   const grip = document.createElement('span');
   grip.className = 'mc-grip';
@@ -1800,16 +2402,22 @@ function buildBlockElement(block, opts) {
     if (e.button !== 0 || e.target.closest('input, select, button, .mc-reporter-pill')) return;
     e.preventDefault();
     e.stopPropagation();
+    const rect = el.getBoundingClientRect();
+    const scale = state.zoomPct / 100 || 1;
     dragCtx.active = true;
     dragCtx.moved = false;
     dragCtx.startX = e.clientX;
     dragCtx.startY = e.clientY;
+    dragCtx.grabOffsetX = Math.max(8, (e.clientX - rect.left) / scale);
+    dragCtx.grabOffsetY = Math.max(8, (e.clientY - rect.top) / scale);
     if (opts.loose) {
       dragCtx.kind = 'loose-cmd';
       dragCtx.looseIndex = opts.looseIdx;
+      dragCtx.looseBlockIndex = opts.looseBlockIdx ?? 0;
     } else {
       dragCtx.kind = 'stack-cmd';
       dragCtx.missionFile = opts.missionFile;
+      dragCtx.sectionId = opts.sectionId || 'Box1';
       dragCtx.blockIndex = opts.stackIdx;
     }
   });
@@ -1823,12 +2431,21 @@ function buildBlockElement(block, opts) {
   return el;
 }
 
-function createDropSlot(missionFile, insertIdx, isEmpty = false) {
+function createDropSlot(missionFile, sectionId, insertIdx, isEmpty = false, emptyLabel = '') {
   const slot = document.createElement('div');
-  slot.className = isEmpty ? 'drop-slot empty-hint' : 'drop-slot';
+  slot.className = isEmpty ? 'drop-slot empty-hint compact' : 'drop-slot';
   slot.dataset.mission = missionFile;
+  slot.dataset.section = sectionId;
   slot.dataset.insertIdx = String(insertIdx);
-  if (isEmpty) slot.textContent = 'ลากบล็อกคำสั่งมาวางต่อใน Mission นี้';
+  if (isEmpty) slot.textContent = emptyLabel || 'ลากบล็อกคำสั่งมาวางต่อในฟังก์ชันนี้';
+  return slot;
+}
+
+function createLooseDropSlot(looseIdx, insertIdx, extraClass = '') {
+  const slot = document.createElement('div');
+  slot.className = `drop-slot loose-slot${extraClass ? ` ${extraClass}` : ''}`;
+  slot.dataset.looseIdx = String(looseIdx);
+  slot.dataset.insertIdx = String(insertIdx);
   return slot;
 }
 
@@ -1840,11 +2457,12 @@ function renderCanvas() {
   let placedCount = 0;
 
   for (const mDef of MISSION_DEFS) {
-    const m = state.missions[mDef.file];
+    const m = ensureMissionStructure(state.missions[mDef.file]);
     if (!m || !m.placed) continue;
     placedCount++;
 
     const isActive = state.activeMissionFile === mDef.file;
+    const totalSteps = getMissionTotalCount(m);
     const container = document.createElement('div');
     container.className = `mission-container${isActive ? ' active' : ''}${m.folded ? ' folded' : ''}`;
     container.dataset.mission = mDef.file;
@@ -1859,7 +2477,7 @@ function renderCanvas() {
       ${svgIcon('play', 'sm')}
       <span>${escapeHtml(mDef.title)}</span>
       <span class="hat-pill">${escapeHtml(mDef.fn)}</span>
-      <span class="mission-count-pill">${m.blocks.length} steps</span>
+      <span class="mission-count-pill">${totalSteps} steps</span>
     `;
 
     const foldBtn = document.createElement('button');
@@ -1906,54 +2524,100 @@ function renderCanvas() {
 
     const body = document.createElement('div');
     body.className = 'mission-c-body';
-    const seq = document.createElement('div');
-    seq.className = 'sequence-list';
 
-    if (m.blocks.length === 0) {
-      seq.appendChild(createDropSlot(mDef.file, 0, true));
-    } else {
-      m.blocks.forEach((blk, idx) => {
-        seq.appendChild(createDropSlot(mDef.file, idx, false));
-        const blkEl = buildBlockElement(blk, {
-          loose: false,
-          missionFile: mDef.file,
-          stackIdx: idx,
-          indexLabel: idx + 1,
-          simActive: isActive && idx === state.sim.activeBlockIndex,
-          onChange: (shouldRender = false, recordUndo = true) => {
-            syncMissionToFile(mDef.file, recordUndo);
-            if (shouldRender) renderCanvas();
-            saveCanvasLayout();
-          },
-          onDuplicate: () => {
-            const copy = JSON.parse(JSON.stringify(blk));
-            m.blocks.splice(idx + 1, 0, copy);
-            renderCanvas();
-            syncMissionToFile(mDef.file);
-            saveCanvasLayout();
-          },
-          onDuplicate: () => {
-        const copy = JSON.parse(JSON.stringify(blk));
-        copy.x = (blk.x ?? 40) + 22;
-        copy.y = (blk.y ?? 40) + 22;
-        state.looseBlocks.push(copy);
+    let globalIdx = 0;
+    for (const sec of MISSION_SECTIONS) {
+      const fnName = getMissionSectionFnName(mDef.file, sec.id);
+      const secBlocks = m.sections[sec.id] || [];
+      const isSecActive = isActive && (m.activeSection || 'Box1') === sec.id;
+      const isSecFolded = !!m.foldedSections?.[sec.id];
+
+      const subCard = document.createElement('div');
+      subCard.className = `mission-subfn${isSecActive ? ' active-subfn' : ''}${isSecFolded ? ' folded' : ''}`;
+      subCard.dataset.mission = mDef.file;
+      subCard.dataset.section = sec.id;
+      subCard.style.setProperty('--sub-accent', sec.accent);
+
+      const subHdr = document.createElement('div');
+      subHdr.className = 'mission-subfn-header';
+      subHdr.title = `คลิกเพื่อเลือก ${fnName}() สำหรับวางบล็อก`;
+      subHdr.innerHTML = `
+        <span class="mission-subfn-dot"></span>
+        <span class="mission-subfn-fn">${escapeHtml(fnName)}()</span>
+        <span class="mission-subfn-count">${secBlocks.length} steps</span>
+      `;
+
+      const subFoldBtn = document.createElement('button');
+      subFoldBtn.type = 'button';
+      subFoldBtn.className = 'mission-subfn-fold';
+      subFoldBtn.title = isSecFolded ? `ขยาย ${fnName}()` : `ย่อ/พับ ${fnName}()`;
+      subFoldBtn.innerHTML = svgIcon('chevron', 'sm');
+      subFoldBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+      subFoldBtn.onclick = () => {
+        m.foldedSections[sec.id] = !m.foldedSections[sec.id];
         renderCanvas();
         saveCanvasLayout();
-        pushBlockSnapshot();
-      },
-      onDelete: () => {
-            m.blocks.splice(idx, 1);
-            renderCanvas();
-            syncMissionToFile(mDef.file);
-            saveCanvasLayout();
-          }
+      };
+      subHdr.appendChild(subFoldBtn);
+
+      subHdr.addEventListener('pointerdown', (e) => e.stopPropagation());
+      subHdr.onclick = (e) => {
+        if (e.target.closest('button')) return;
+        const changedMission = state.activeMissionFile !== mDef.file;
+        m.activeSection = sec.id;
+        if (changedMission) setActiveMission(mDef.file);
+        else {
+          renderCanvas();
+          saveCanvasLayout();
+        }
+      };
+
+      subCard.appendChild(subHdr);
+
+      const subBody = document.createElement('div');
+      subBody.className = 'mission-subfn-body';
+      const seq = document.createElement('div');
+      seq.className = 'sequence-list';
+
+      if (secBlocks.length === 0) {
+        seq.appendChild(createDropSlot(mDef.file, sec.id, 0, true, `ลากบล็อกลง ${fnName}()`));
+      } else {
+        secBlocks.forEach((blk, idx) => {
+          const myGlobalIdx = globalIdx++;
+          seq.appendChild(createDropSlot(mDef.file, sec.id, idx, false));
+          const blkEl = buildBlockElement(blk, {
+            loose: false,
+            missionFile: mDef.file,
+            sectionId: sec.id,
+            stackIdx: idx,
+            globalIdx: myGlobalIdx,
+            indexLabel: myGlobalIdx + 1,
+            simActive: isActive && myGlobalIdx === state.sim.activeBlockIndex,
+            stackTailCount: secBlocks.length - idx,
+            onChange: (shouldRender = false, recordUndo = true) => {
+              syncMissionToFile(mDef.file, recordUndo);
+              if (shouldRender) renderCanvas();
+              saveCanvasLayout();
+            },
+            onDuplicate: (canvasPt) => spawnDuplicatedLooseStack([blk], canvasPt),
+            onDuplicateStack: (canvasPt) => spawnDuplicatedLooseStack(secBlocks.slice(idx), canvasPt),
+            onDelete: () => {
+              secBlocks.splice(idx, 1);
+              renderCanvas();
+              syncMissionToFile(mDef.file);
+              saveCanvasLayout();
+            }
+          });
+          seq.appendChild(blkEl);
         });
-        seq.appendChild(blkEl);
-      });
-      seq.appendChild(createDropSlot(mDef.file, m.blocks.length, false));
+        seq.appendChild(createDropSlot(mDef.file, sec.id, secBlocks.length, false));
+      }
+
+      subBody.appendChild(seq);
+      subCard.appendChild(subBody);
+      body.appendChild(subCard);
     }
 
-    body.appendChild(seq);
     container.appendChild(body);
 
     const footer = document.createElement('div');
@@ -1966,35 +2630,57 @@ function renderCanvas() {
     stage.appendChild(container);
   }
 
-  state.looseBlocks.forEach((blk, lIdx) => {
-    const el = buildBlockElement(blk, {
-      loose: true,
-      looseIdx: lIdx,
-      onChange: (shouldRender = false) => {
-        if (shouldRender) renderCanvas();
-        saveCanvasLayout();
-        pushBlockSnapshot();
-      },
-      onDuplicate: () => {
-        const copy = JSON.parse(JSON.stringify(blk));
-        copy.x = (blk.x ?? 40) + 22;
-        copy.y = (blk.y ?? 40) + 22;
-        state.looseBlocks.push(copy);
-        renderCanvas();
-        saveCanvasLayout();
-        pushBlockSnapshot();
-      },
-      onDelete: () => {
-        state.looseBlocks.splice(lIdx, 1);
-        renderCanvas();
-        saveCanvasLayout();
-        pushBlockSnapshot();
-      }
+  state.looseBlocks.forEach((stack, lIdx) => {
+    if (!stack || !Array.isArray(stack.blocks) || stack.blocks.length === 0) return;
+    const stackEl = document.createElement('div');
+    stackEl.className = `loose-stack${stack.id === state.lastDuplicatedStackId ? ' just-duplicated' : ''}`;
+    stackEl.dataset.looseIdx = String(lIdx);
+    stackEl.style.left = `${stack.x ?? 40}px`;
+    stackEl.style.top = `${stack.y ?? 40}px`;
+    stackEl.style.zIndex = String(stack.z || 30);
+
+    // Bring any clicked or right-clicked loose stack to the topmost canvas layer
+    stackEl.addEventListener('pointerdown', () => {
+      stack.z = allocateTopLooseZ();
+      stackEl.style.zIndex = String(stack.z);
+    }, { capture: true });
+
+    stackEl.appendChild(createLooseDropSlot(lIdx, 0, 'loose-slot-top'));
+
+    stack.blocks.forEach((blk, subIdx) => {
+      const el = buildBlockElement(blk, {
+        loose: true,
+        looseIdx: lIdx,
+        looseBlockIdx: subIdx,
+        stackTailCount: stack.blocks.length - subIdx,
+        onChange: (shouldRender = false) => {
+          if (shouldRender) renderCanvas();
+          saveCanvasLayout();
+          pushBlockSnapshot();
+        },
+        onDuplicate: (canvasPt) => spawnDuplicatedLooseStack([blk], canvasPt),
+        onDuplicateStack: (canvasPt) => spawnDuplicatedLooseStack(stack.blocks.slice(subIdx), canvasPt),
+        onDelete: () => {
+          stack.blocks.splice(subIdx, 1);
+          if (stack.blocks.length === 0) state.looseBlocks.splice(lIdx, 1);
+          renderCanvas();
+          saveCanvasLayout();
+          pushBlockSnapshot();
+        }
+      });
+      stackEl.appendChild(el);
+      stackEl.appendChild(
+        createLooseDropSlot(
+          lIdx,
+          subIdx + 1,
+          subIdx === stack.blocks.length - 1 ? 'loose-slot-end' : 'loose-slot-mid'
+        )
+      );
     });
-    el.style.left = `${blk.x}px`;
-    el.style.top = `${blk.y}px`;
-    stage.appendChild(el);
+
+    stage.appendChild(stackEl);
   });
+  state.lastDuplicatedStackId = -1;
 
   if (placedCount === 0 && state.looseBlocks.length === 0) {
     const hint = document.createElement('div');
@@ -2021,6 +2707,21 @@ function openCodeFile(name) {
   updateDirtyIndicator();
   updateDocumentTitle();
   renderFileList();
+  if (state.mode === 'code') {
+    if (state.missions[name]) {
+      parseMissionFile(name);
+      state.activeMissionFile = name;
+      rebuildSimAndDraw(true);
+      if ($('codeSimHint') && isClickToSeekSimEnabled()) {
+        $('codeSimHint').textContent = `${name} · คลิกบรรทัดเพื่อย้ายจุดจำลอง`;
+      }
+    } else {
+      drawSimulator(state);
+      if ($('codeSimHint') && isClickToSeekSimEnabled()) {
+        $('codeSimHint').textContent = `ไฟล์ ${name} (แสดงผลภารกิจ ${state.activeMissionFile})`;
+      }
+    }
+  }
 }
 
 function renderFileList() {
@@ -2070,8 +2771,317 @@ function updateDirtyIndicator() {
 }
 
 // ============================================================================
-// Simulator Control
+// Field Map Storage & Map Manager Controller Integration
 // ============================================================================
+function saveFieldMapToStorage() {
+  try {
+    const fm = state.fieldMap;
+    localStorage.setItem(FIELD_MAP_STORAGE_KEY, JSON.stringify({
+      rows: fm.rows,
+      cols: fm.cols,
+      tileWidthCm: fm.tileWidthCm,
+      simViewMode: fm.simViewMode,
+      simCameraRot: fm.simCameraRot,
+      showMarkers: !!fm.showMarkers,
+      compactGrid: buildCompactGrid(fm.gridData)
+    }));
+  } catch (_) {}
+}
+
+function syncSimGridInputsFromFieldMap() {
+  const fm = state.fieldMap;
+  if ($('simCellSizeCm')) $('simCellSizeCm').value = String(fm.tileWidthCm);
+  if ($('simGridCols')) $('simGridCols').value = String(fm.cols);
+  if ($('simGridRows')) $('simGridRows').value = String(fm.rows);
+}
+
+function syncSimStartFromFieldStartTile() {
+  const startCell = findStartTileCell(state.fieldMap.gridData);
+  if (!startCell) return false;
+  if ($('simStartCol')) $('simStartCol').value = String(startCell.col);
+  if ($('simStartRow')) $('simStartRow').value = String(startCell.row);
+  return true;
+}
+
+function syncSimViewButtons() {
+  const fm = state.fieldMap;
+  const isIso = fm.simViewMode === 'iso';
+  const camLocked = !!state.sim.cameraFollowRobot;
+  for (const btnId of ['btnSimViewMode', 'btnCodeSimViewMode']) {
+    const btn = $(btnId);
+    if (btn) {
+      setBtnContent(btn, isIso ? 'grid' : 'cube', isIso ? '3D Iso' : '2D View', 'sm');
+      btn.classList.toggle('active', isIso);
+    }
+  }
+  for (const rotBtnId of ['btnSimRotateIso', 'btnCodeSimRotateIso']) {
+    const rotBtn = $(rotBtnId);
+    if (rotBtn) {
+      rotBtn.hidden = !isIso;
+      rotBtn.disabled = camLocked;
+      rotBtn.title = camLocked
+        ? 'ปิด Lock Camera ใน IDE Settings เพื่อหมุนกล้องอิสระ'
+        : 'หมุนมุมกล้อง 3D Iso 90°';
+      const lbl = rotBtn.querySelector('span');
+      if (lbl) lbl.textContent = camLocked ? 'LOCK' : `${fm.simCameraRot || 0}°`;
+    }
+  }
+}
+
+function toggleSimViewMode() {
+  state.fieldMap.simViewMode = state.fieldMap.simViewMode === 'iso' ? '2d' : 'iso';
+  syncSimViewButtons();
+  saveFieldMapToStorage();
+  drawSimulator(state);
+}
+
+function rotateSimIsoCamera() {
+  state.fieldMap.simCameraRot = (Number(state.fieldMap.simCameraRot || 0) + 90) % 360;
+  syncSimViewButtons();
+  saveFieldMapToStorage();
+  drawSimulator(state);
+}
+
+const LEGACY_REMOVED_TILE_MAP = { 5: 1, 8: 3, 9: 2, 10: 1, 11: 3 };
+
+function sanitizeLegacyCompactGrid(compactGrid) {
+  if (!Array.isArray(compactGrid)) return compactGrid;
+  return compactGrid.map((row) =>
+    Array.isArray(row)
+      ? row.map((token) => {
+          if (typeof token !== 'string' || !token) return token;
+          const parts = token.split('@');
+          const id = parseInt(parts[0], 10);
+          const rot = parseInt(parts[1], 10) || 0;
+          const mapped = LEGACY_REMOVED_TILE_MAP[id];
+          return mapped ? `${mapped}@${rot}` : token;
+        })
+      : row
+  );
+}
+
+function loadFieldMapFromStorage() {
+  try {
+    const raw = localStorage.getItem(FIELD_MAP_STORAGE_KEY);
+    if (!raw) {
+      syncSimGridInputsFromFieldMap();
+      syncSimViewButtons();
+      return;
+    }
+    const saved = JSON.parse(raw);
+    const rows = Math.max(2, Math.min(24, Number(saved.rows) || 7));
+    const cols = Math.max(2, Math.min(24, Number(saved.cols) || 7));
+    const tileWidthCm = Math.max(5, Math.min(200, Number(saved.tileWidthCm) || 30));
+    state.fieldMap.rows = rows;
+    state.fieldMap.cols = cols;
+    state.fieldMap.tileWidthCm = tileWidthCm;
+    state.fieldMap.simViewMode = saved.simViewMode === 'iso' ? 'iso' : '2d';
+    state.fieldMap.simCameraRot = (((Number(saved.simCameraRot) || 0) % 360) + 360) % 360;
+    state.fieldMap.showMarkers = !!saved.showMarkers;
+    if (Array.isArray(saved.compactGrid)) {
+      state.fieldMap.gridData = parseCompactGrid(sanitizeLegacyCompactGrid(saved.compactGrid), rows, cols);
+    }
+  } catch (_) {}
+  syncSimGridInputsFromFieldMap();
+  syncSimViewButtons();
+}
+
+const mapManager = createMapManagerController({
+  getFieldState: () => state.fieldMap,
+  setFieldState: (next) => { state.fieldMap = next; },
+  getSimContext: () => ({
+    segments: state.sim.segments,
+    segIdx: state.sim.segIdx,
+    segProgress: state.sim.segProgress,
+    robotX: state.sim.robotX,
+    robotY: state.sim.robotY,
+    robotH: state.sim.robotH
+  }),
+  onFieldChanged: ({ syncStart } = {}) => {
+    syncSimGridInputsFromFieldMap();
+    if (syncStart) syncSimStartFromFieldStartTile();
+    saveFieldMapToStorage();
+    rebuildSimAndDraw(!!syncStart);
+  },
+  onBackToSim: () => switchMode('visual'),
+  appendConsole
+});
+
+// ============================================================================
+// Simulator Control & Click-to-Seek Simulation (Blocks + Code Lines)
+// ============================================================================
+function isClickToSeekSimEnabled() {
+  return !!codeIde.getSettings().clickToSeekSim;
+}
+
+function setSimPlayButtons(playing) {
+  const icon = playing ? 'pause' : 'play';
+  const label = playing ? 'Pause' : 'Run';
+  setBtnContent($('btnSimPlay'), icon, label, 'sm');
+  setBtnContent($('btnCodeSimPlay'), icon, label, 'sm');
+}
+
+function updateSimActiveVisuals() {
+  const activeIdx = state.sim.activeBlockIndex;
+  const activeFile = state.activeMissionFile;
+
+  document.querySelectorAll('.mc-block[data-mission]').forEach((blk) => {
+    const match = activeIdx >= 0 && blk.dataset.mission === activeFile && Number(blk.dataset.globalIdx) === activeIdx;
+    blk.classList.toggle('sim-active', match);
+  });
+
+  const pre = $('visualCodePreview');
+  if (pre) {
+    const code = pre._rawCode ?? state.files[activeFile] ?? '';
+    const activeLine = activeIdx >= 0 ? buildMissionLineIndex(activeFile, code).blockToLine.get(activeIdx) : null;
+    let activeRow = null;
+    pre.querySelectorAll('.preview-code-line').forEach((row) => {
+      const isMatch = activeLine != null && Number(row.dataset.line) === activeLine;
+      row.classList.toggle('sim-line-active', isMatch);
+      if (isMatch) activeRow = row;
+    });
+    if (activeRow) activeRow.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function renderVisualCodePreview(code, filename = state.activeMissionFile) {
+  const pre = $('visualCodePreview');
+  if (!pre) return;
+  const text = String(code || '');
+  if (pre._lastSig === `${filename}\0${text}`) {
+    updateSimActiveVisuals();
+    return;
+  }
+  pre._lastSig = `${filename}\0${text}`;
+  pre._missionFile = filename;
+  pre._rawCode = text;
+
+  if (!pre.dataset.seekBound) {
+    pre.dataset.seekBound = '1';
+    pre.addEventListener('click', (e) => {
+      if (!isClickToSeekSimEnabled()) return;
+      const row = e.target.closest('.preview-code-line');
+      if (!row) return;
+      const ln = parseInt(row.dataset.line, 10);
+      if (ln > 0) seekSimulationToCodeLine(pre._missionFile || state.activeMissionFile, pre._rawCode || '', ln);
+    });
+  }
+
+  const lines = text.split('\n');
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < lines.length; i++) {
+    const row = document.createElement('div');
+    row.className = 'preview-code-line';
+    row.dataset.line = String(i + 1);
+    const lnSpan = document.createElement('span');
+    lnSpan.className = 'preview-code-ln';
+    lnSpan.textContent = String(i + 1);
+    const txtSpan = document.createElement('span');
+    txtSpan.className = 'preview-code-text';
+    txtSpan.textContent = lines[i] || ' ';
+    row.append(lnSpan, txtSpan);
+    frag.appendChild(row);
+  }
+  pre.innerHTML = '';
+  pre.appendChild(frag);
+  updateSimActiveVisuals();
+}
+
+function applySeekPoseForBlock(globalBlockIdx, built = null) {
+  const resolvedBuilt = built || buildSimSegments(state);
+  const segs = resolvedBuilt.segments;
+  state.sim.segments = segs;
+  state.sim.stats = resolvedBuilt.stats;
+
+  let lastSegIdx = -1;
+  for (let i = 0; i < segs.length; i++) {
+    if (segs[i].blockIdx <= globalBlockIdx) lastSegIdx = i;
+  }
+
+  if (globalBlockIdx < 0 || lastSegIdx < 0) {
+    state.sim.segIdx = 0;
+    state.sim.segProgress = 0;
+    state.sim.elapsedMs = 0;
+    state.sim.robotX = resolvedBuilt.startX;
+    state.sim.robotY = resolvedBuilt.startY;
+    state.sim.robotH = resolvedBuilt.startH;
+    state.sim.activeBlockIndex = globalBlockIdx;
+    return;
+  }
+
+  const seg = segs[lastSegIdx];
+  state.sim.segIdx = lastSegIdx;
+  state.sim.segProgress = 1;
+  state.sim.elapsedMs = seg.endMs;
+  state.sim.robotX = seg.tx;
+  state.sim.robotY = seg.ty;
+  state.sim.robotH = seg.th;
+  state.sim.activeBlockIndex = globalBlockIdx;
+}
+
+function seekSimulationToBlock(missionFile, globalBlockIdx, { lineNumber = null } = {}) {
+  if (!isClickToSeekSimEnabled()) return;
+  state.sim.playing = false;
+  if (state.sim.rafId) cancelAnimationFrame(state.sim.rafId);
+  setSimPlayButtons(false);
+
+  if (missionFile && state.missions[missionFile] && state.activeMissionFile !== missionFile) {
+    setActiveMission(missionFile, false);
+  }
+
+  const built = buildSimSegments(state);
+  applySeekPoseForBlock(globalBlockIdx, built);
+
+  const hintEl = $('codeSimHint');
+  if (hintEl) {
+    const fileLabel = missionFile || state.activeMissionFile;
+    const totalSegs = built.segments.length;
+    const lineTag = lineNumber ? ` · บรรทัด ${lineNumber}` : '';
+    if (globalBlockIdx < 0) {
+      hintEl.textContent = `${fileLabel}${lineTag} → จุดเริ่มต้น (Start Pose)`;
+    } else {
+      const stepNum = state.sim.segProgress >= 1 ? state.sim.segIdx + 1 : 0;
+      hintEl.textContent = `${fileLabel}${lineTag} → บล็อก #${globalBlockIdx + 1} (Step ${stepNum}/${totalSegs})`;
+    }
+  }
+
+  updateSimActiveVisuals();
+  drawSimulator(state);
+}
+
+function seekSimulationToSectionBlock(missionFile, sectionId, stackIdx) {
+  if (!isClickToSeekSimEnabled()) return;
+  const m = ensureMissionStructure(state.missions[missionFile]);
+  if (!m) return;
+  let globalIdx = 0;
+  let found = -1;
+  for (const sec of MISSION_SECTIONS) {
+    const list = m.sections[sec.id] || [];
+    if (sec.id === sectionId) {
+      if (stackIdx >= 0 && stackIdx < list.length) found = globalIdx + stackIdx;
+      break;
+    }
+    globalIdx += list.length;
+  }
+  if (found >= 0) seekSimulationToBlock(missionFile, found);
+}
+
+function seekSimulationToCodeLine(filename, code, lineNumber) {
+  if (!isClickToSeekSimEnabled()) return;
+  if (!state.missions[filename]) {
+    if ($('codeSimHint')) {
+      $('codeSimHint').textContent = `ไฟล์ ${filename} ไม่ใช่ไฟล์ภารกิจ (เลือก RunMode1–3.ino เพื่อคลิกจำลอง)`;
+    }
+    return;
+  }
+  if (typeof code === 'string' && state.files[filename] !== code) {
+    state.files[filename] = code;
+  }
+  parseMissionFile(filename);
+  const resolved = resolveBlockIndexForCodeLine(filename, state.files[filename] || code || '', lineNumber);
+  seekSimulationToBlock(filename, resolved.globalBlockIdx, { lineNumber });
+}
+
 function rebuildSimAndDraw(resetPose = true) {
   const built = buildSimSegments(state);
   state.sim.segments = built.segments;
@@ -2086,10 +3096,59 @@ function rebuildSimAndDraw(resetPose = true) {
     state.sim.robotY = built.startY;
     state.sim.robotH = built.startH;
     state.sim.activeBlockIndex = -1;
-    setBtnContent($('btnSimPlay'), 'play', 'Run', 'sm');
+    setSimPlayButtons(false);
     renderCanvas();
+  } else if (!state.sim.playing && state.sim.activeBlockIndex >= 0 && isClickToSeekSimEnabled()) {
+    applySeekPoseForBlock(state.sim.activeBlockIndex, built);
+    updateSimActiveVisuals();
   }
   drawSimulator(state);
+}
+
+function toggleSimPlay() {
+  if (state.sim.playing) {
+    state.sim.playing = false;
+    setSimPlayButtons(false);
+    return;
+  }
+  const segs = state.sim.segments;
+  if (segs.length === 0 || state.sim.segIdx >= segs.length || (state.sim.segIdx === segs.length - 1 && state.sim.segProgress >= 1)) {
+    rebuildSimAndDraw(true);
+  } else if (state.sim.segProgress >= 1) {
+    state.sim.segIdx++;
+    state.sim.segProgress = 0;
+  }
+  state.sim.playing = true;
+  state.sim.lastTs = 0;
+  setSimPlayButtons(true);
+  state.sim.rafId = requestAnimationFrame(stepSimulatorFrame);
+}
+
+function stepSimOnce() {
+  state.sim.playing = false;
+  setSimPlayButtons(false);
+  if (state.sim.segProgress >= 1) {
+    state.sim.segIdx++;
+    state.sim.segProgress = 0;
+  }
+  if (state.sim.segIdx >= state.sim.segments.length) {
+    rebuildSimAndDraw(true);
+    return;
+  }
+  const seg = state.sim.segments[state.sim.segIdx];
+  state.sim.robotX = seg.tx;
+  state.sim.robotY = seg.ty;
+  state.sim.robotH = seg.th;
+  state.sim.elapsedMs = seg.endMs;
+  state.sim.activeBlockIndex = seg.blockIdx;
+  state.sim.segIdx++;
+  state.sim.segProgress = 0;
+  updateSimActiveVisuals();
+  drawSimulator(state);
+}
+
+function resetSimPose() {
+  rebuildSimAndDraw(true);
 }
 
 function stepSimulatorFrame(ts) {
@@ -2097,9 +3156,9 @@ function stepSimulatorFrame(ts) {
   const segs = state.sim.segments;
   if (state.sim.segIdx >= segs.length) {
     state.sim.playing = false;
-    setBtnContent($('btnSimPlay'), 'play', 'Run', 'sm');
+    setSimPlayButtons(false);
     state.sim.activeBlockIndex = -1;
-    renderCanvas();
+    updateSimActiveVisuals();
     drawSimulator(state);
     return;
   }
@@ -2111,7 +3170,7 @@ function stepSimulatorFrame(ts) {
 
   if (state.sim.activeBlockIndex !== seg.blockIdx) {
     state.sim.activeBlockIndex = seg.blockIdx;
-    renderCanvas();
+    updateSimActiveVisuals();
   }
 
   state.sim.segProgress += (dt * speedMul) / Math.max(80, seg.dur);
@@ -2124,9 +3183,10 @@ function stepSimulatorFrame(ts) {
     state.sim.segProgress = 0;
   } else {
     const t = state.sim.segProgress;
-    state.sim.robotX = seg.fx + (seg.tx - seg.fx) * t;
-    state.sim.robotY = seg.fy + (seg.ty - seg.fy) * t;
-    state.sim.robotH = seg.fh + (seg.th - seg.fh) * t;
+    const pose = evalSegmentPose(seg, t);
+    state.sim.robotX = pose.x;
+    state.sim.robotY = pose.y;
+    state.sim.robotH = pose.h;
     state.sim.elapsedMs = seg.startMs + seg.dur * t;
   }
 
@@ -2789,7 +3849,7 @@ function createConfigRow(field, onToggleChange = null) {
   const ctrlWrap = document.createElement('div');
   ctrlWrap.className = 'cfg-row-control';
   if (field.type === 'bool') {
-    const checked = !!state.config[field.key];
+    const checked = state.config[field.key] !== undefined ? !!state.config[field.key] : !!field.default;
     const sw = document.createElement('button');
     sw.type = 'button';
     sw.className = 'm-switch';
@@ -2811,7 +3871,7 @@ function createConfigRow(field, onToggleChange = null) {
     if (field.min !== undefined) inp.min = field.min;
     if (field.max !== undefined) inp.max = field.max;
     if (field.step !== undefined) inp.step = field.step;
-    inp.value = state.config[field.key] ?? 0;
+    inp.value = state.config[field.key] ?? (field.default ?? 0);
     ctrlWrap.appendChild(inp);
   }
   row.appendChild(ctrlWrap);
@@ -2941,6 +4001,7 @@ function applyPanelPrefs() {
   r.setProperty('--preview-h', `${Math.max(76, Math.min(420, p.previewH))}px`);
   r.setProperty('--drawer-h', `${p.drawerMaximized ? 360 : Math.max(82, Math.min(520, p.drawerH))}px`);
   r.setProperty('--code-sidebar-w', `${Math.max(170, Math.min(440, p.codeSidebarW))}px`);
+  r.setProperty('--code-sim-w', `${Math.max(260, Math.min(560, p.codeSimW || 340))}px`);
 
   const vl = $('visualLayout');
   if (vl) {
@@ -2951,8 +4012,12 @@ function applyPanelPrefs() {
   if ($('btnRestoreSimulator')) $('btnRestoreSimulator').hidden = !p.simCollapsed;
   if ($('generatedPreview')) $('generatedPreview').classList.toggle('collapsed', !!p.previewCollapsed);
   if ($('simulatorPane')) $('simulatorPane').classList.toggle('config-collapsed', !!p.simConfigCollapsed);
-  if ($('codeLayout')) $('codeLayout').classList.toggle('sidebar-collapsed', !!p.codeSidebarCollapsed);
+  if ($('codeLayout')) {
+    $('codeLayout').classList.toggle('sidebar-collapsed', !!p.codeSidebarCollapsed);
+    $('codeLayout').classList.toggle('code-sim-collapsed', !!p.codeSimCollapsed);
+  }
   if ($('btnExpandCodeSidebar')) $('btnExpandCodeSidebar').hidden = !p.codeSidebarCollapsed;
+  if ($('btnToggleCodeSim')) $('btnToggleCodeSim').classList.toggle('active', !p.codeSimCollapsed);
 
   const bd = $('bottomDrawer');
   if (bd) {
@@ -3014,6 +4079,10 @@ function initResizablePanels() {
   bindSplitResizer('resizerCodeSidebar', 'x', () => state.panelPrefs.codeSidebarW, (initW, d) => {
     state.panelPrefs.codeSidebarW = Math.max(170, Math.min(440, initW + d));
   });
+  bindSplitResizer('resizerCodeSim', 'x', () => state.panelPrefs.codeSimW || 340, (initW, d) => {
+    state.panelPrefs.codeSimCollapsed = false;
+    state.panelPrefs.codeSimW = Math.max(260, Math.min(560, initW - d));
+  });
 }
 
 // ============================================================================
@@ -3026,7 +4095,10 @@ function getCurrentSimSettings() {
     rows: Number($('simGridRows')?.value) || 7,
     startCol: Number($('simStartCol')?.value) || 1,
     startRow: Number($('simStartRow')?.value) || 5,
-    startHeading: Number($('simStartHeading')?.value) || 0
+    startHeading: Number($('simStartHeading')?.value) || 0,
+    simViewMode: state.fieldMap.simViewMode,
+    simCameraRot: state.fieldMap.simCameraRot,
+    compactGrid: buildCompactGrid(state.fieldMap.gridData)
   };
 }
 
@@ -3038,6 +4110,21 @@ function applySimSettings(s) {
   if ($('simStartCol') && s.startCol !== undefined) $('simStartCol').value = s.startCol;
   if ($('simStartRow') && s.startRow !== undefined) $('simStartRow').value = s.startRow;
   if ($('simStartHeading') && s.startHeading !== undefined) $('simStartHeading').value = String(s.startHeading);
+
+  const rows = Math.max(2, Math.min(24, Number(s.rows) || state.fieldMap.rows));
+  const cols = Math.max(2, Math.min(24, Number(s.cols) || state.fieldMap.cols));
+  const tileWidthCm = Math.max(5, Math.min(200, Number(s.cellCm) || state.fieldMap.tileWidthCm));
+  state.fieldMap.rows = rows;
+  state.fieldMap.cols = cols;
+  state.fieldMap.tileWidthCm = tileWidthCm;
+  if (s.simViewMode === '2d' || s.simViewMode === 'iso') state.fieldMap.simViewMode = s.simViewMode;
+  if (Number.isFinite(s.simCameraRot)) state.fieldMap.simCameraRot = s.simCameraRot;
+  if (Array.isArray(s.compactGrid)) {
+    state.fieldMap.gridData = parseCompactGrid(sanitizeLegacyCompactGrid(s.compactGrid), rows, cols);
+  }
+  syncSimViewButtons();
+  saveFieldMapToStorage();
+  mapManager.refreshFromExternal();
 }
 
 async function loadVersions() {
@@ -3073,7 +4160,7 @@ function resetVersionForm() {
 function openVersionModal() {
   resetVersionForm();
   const modified = Object.keys(state.files).filter((k) => state.files[k] !== state.savedFiles[k]);
-  const mSummary = MISSION_DEFS.map((d) => `M${d.file.match(/\d/)?.[0]}:${state.missions[d.file]?.blocks.length || 0}`).join(' ');
+  const mSummary = MISSION_DEFS.map((d) => `M${d.file.match(/\d/)?.[0]}:${getMissionTotalCount(state.missions[d.file])}`).join(' ');
   if ($('verChangedFilesHint')) {
     $('verChangedFilesHint').textContent = modified.length > 0
       ? `มีไฟล์แก้ไข: ${modified.join(', ')} (${mSummary})`
@@ -3194,12 +4281,19 @@ async function commitOrUpdateVersion() {
         activeMissionFile: state.activeMissionFile,
         zoomPct: state.zoomPct,
         missions: Object.fromEntries(MISSION_DEFS.map((d) => {
-          const m = state.missions[d.file];
-          return [d.file, { placed: !!m.placed, x: Math.round(m.x), y: Math.round(m.y), folded: !!m.folded }];
+          const m = ensureMissionStructure(state.missions[d.file]);
+          return [d.file, {
+            placed: !!m.placed,
+            x: Math.round(m.x),
+            y: Math.round(m.y),
+            folded: !!m.folded,
+            activeSection: m.activeSection || 'Box1',
+            foldedSections: m.foldedSections || {}
+          }];
         })),
         looseBlocks: state.looseBlocks
       };
-      const blockSummary = MISSION_DEFS.map((d) => `M${d.file.match(/\d/)?.[0]}:${state.missions[d.file]?.blocks.length || 0}`).join(' · ');
+      const blockSummary = MISSION_DEFS.map((d) => `M${d.file.match(/\d/)?.[0]}:${getMissionTotalCount(state.missions[d.file])}`).join(' · ');
 
       const res = await apiJson('/api/versions', {
         method: 'POST',
@@ -3263,15 +4357,22 @@ async function restoreVersionById(id, title) {
       if (res.canvasLayout.missions) {
         for (const d of MISSION_DEFS) {
           const sm = res.canvasLayout.missions[d.file];
-          if (sm) {
-            state.missions[d.file].placed = !!sm.placed;
-            state.missions[d.file].x = Number.isFinite(sm.x) ? sm.x : d.defaultX;
-            state.missions[d.file].y = Number.isFinite(sm.y) ? sm.y : d.defaultY;
-            state.missions[d.file].folded = !!sm.folded;
+          const m = ensureMissionStructure(state.missions[d.file]);
+          if (sm && m) {
+            m.placed = !!sm.placed;
+            m.x = Number.isFinite(sm.x) ? sm.x : d.defaultX;
+            m.y = Number.isFinite(sm.y) ? sm.y : d.defaultY;
+            m.folded = !!sm.folded;
+            if (sm.activeSection && MISSION_SECTIONS.some((s) => s.id === sm.activeSection)) {
+              m.activeSection = sm.activeSection;
+            }
+            if (sm.foldedSections && typeof sm.foldedSections === 'object') {
+              m.foldedSections = { ...sm.foldedSections };
+            }
           }
         }
       }
-      if (Array.isArray(res.canvasLayout.looseBlocks)) state.looseBlocks = res.canvasLayout.looseBlocks;
+      if (Array.isArray(res.canvasLayout.looseBlocks)) state.looseBlocks = normalizeLooseStacks(res.canvasLayout.looseBlocks);
       saveCanvasLayout();
     }
     if (res.simSettings) applySimSettings(res.simSettings);
@@ -3285,7 +4386,7 @@ async function restoreVersionById(id, title) {
     parseAllMissionsFromFiles();
     codeIde.resetAllHistory();
     codeIde.loadFileIntoEditor(state.activeCodeFile, state.files[state.activeCodeFile] || '');
-    if ($('visualCodePreview')) $('visualCodePreview').textContent = state.files[state.activeMissionFile] || '';
+    renderVisualCodePreview(state.files[state.activeMissionFile] || '', state.activeMissionFile);
     updateDirtyIndicator();
     renderPalette();
     renderCanvas();
@@ -3450,24 +4551,53 @@ function renderVersionTimeline() {
 // Mode & Drawer Switching
 // ============================================================================
 function switchMode(mode) {
+  const prevMode = state.mode;
+  if (prevMode === 'map' && mode !== 'map') {
+    mapManager.deactivate();
+    if (state.drawerStateBeforeMap) {
+      state.panelPrefs.drawerCollapsed = state.drawerStateBeforeMap.drawerCollapsed;
+      state.panelPrefs.drawerMaximized = state.drawerStateBeforeMap.drawerMaximized;
+      state.drawerStateBeforeMap = null;
+      applyPanelPrefs();
+    }
+  } else if (prevMode !== 'map' && mode === 'map') {
+    state.drawerStateBeforeMap = {
+      drawerCollapsed: !!state.panelPrefs.drawerCollapsed,
+      drawerMaximized: !!state.panelPrefs.drawerMaximized
+    };
+    state.panelPrefs.drawerCollapsed = true;
+    state.panelPrefs.drawerMaximized = false;
+    applyPanelPrefs();
+  }
+
   state.mode = mode;
   $('btnModeVisual').classList.toggle('active', mode === 'visual');
   $('btnModeCode').classList.toggle('active', mode === 'code');
+  if ($('btnModeMap')) $('btnModeMap').classList.toggle('active', mode === 'map');
   $('viewVisual').classList.toggle('active', mode === 'visual');
   $('viewCode').classList.toggle('active', mode === 'code');
+  if ($('viewMap')) $('viewMap').classList.toggle('active', mode === 'map');
 
   if (mode === 'visual') {
     parseAllMissionsFromFiles();
     renderPalette();
     renderCanvas();
-    if ($('visualCodePreview')) $('visualCodePreview').textContent = state.files[state.activeMissionFile] || '';
+    renderVisualCodePreview(state.files[state.activeMissionFile] || '', state.activeMissionFile);
     rebuildSimAndDraw(true);
-  } else {
+  } else if (mode === 'code') {
     if (!state.files[state.activeCodeFile]) state.activeCodeFile = state.activeMissionFile;
     openCodeFile(state.activeCodeFile);
     codeIde.renderEditorVisuals();
+    drawSimulator(state);
+  } else if (mode === 'map') {
+    mapManager.activate();
   }
   updateDocumentTitle();
+}
+
+function openQuickFieldScan() {
+  switchMode('map');
+  mapManager.setActiveMapTab('scan');
 }
 
 function activateDrawerTab(tabName) {
@@ -3484,6 +4614,8 @@ function activateDrawerTab(tabName) {
 // ============================================================================
 async function init() {
   loadAutoSavePref();
+  loadFieldMapFromStorage();
+  mapManager.init();
   initResizablePanels();
   loadCanvasLayout();
   renderCategoryRail();
@@ -3491,6 +4623,8 @@ async function init() {
   renderSnippets();
   applyCanvasZoom(state.zoomPct);
   codeIde.bindEvents();
+  state.sim.cameraFollowRobot = !!codeIde.getSettings().cameraFollowRobot;
+  syncSimViewButtons();
   updateDocumentTitle();
 
   try {
@@ -3504,7 +4638,7 @@ async function init() {
     parseAllMissionsFromFiles();
     renderPalette();
     renderCanvas();
-    if ($('visualCodePreview')) $('visualCodePreview').textContent = state.files[state.activeMissionFile] || '';
+    renderVisualCodePreview(state.files[state.activeMissionFile] || '', state.activeMissionFile);
     openCodeFile(state.activeCodeFile);
     renderArtifacts();
     rebuildSimAndDraw(true);
@@ -3517,7 +4651,7 @@ async function init() {
 
 $('blockCanvas').addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
-  if (e.target.closest('.mission-container, .loose-block, .trash-dropzone')) return;
+  if (e.target.closest('.mission-container, .loose-stack, .loose-block, .trash-dropzone')) return;
   dragCtx.active = true;
   dragCtx.moved = false;
   dragCtx.kind = 'pan';
@@ -3535,6 +4669,7 @@ $('blockCanvas').addEventListener('wheel', (e) => {
 
 $('btnModeVisual').onclick = () => switchMode('visual');
 $('btnModeCode').onclick = () => switchMode('code');
+if ($('btnModeMap')) $('btnModeMap').onclick = () => switchMode('map');
 document.querySelectorAll('.pane-tab-btn').forEach((btn) => { btn.onclick = () => setActiveVisualPane(btn.dataset.pane); });
 
 if ($('btnToggleCodePreview')) $('btnToggleCodePreview').onclick = () => { state.panelPrefs.previewCollapsed = !state.panelPrefs.previewCollapsed; applyPanelPrefs(); savePanelPrefs(); };
@@ -3546,6 +4681,20 @@ if ($('btnExpandSimulator')) $('btnExpandSimulator').onclick = () => { state.pan
 if ($('btnToggleSimConfig')) $('btnToggleSimConfig').onclick = () => { state.panelPrefs.simConfigCollapsed = !state.panelPrefs.simConfigCollapsed; applyPanelPrefs(); savePanelPrefs(); };
 if ($('btnCollapseCodeSidebar')) $('btnCollapseCodeSidebar').onclick = () => { state.panelPrefs.codeSidebarCollapsed = true; applyPanelPrefs(); savePanelPrefs(); };
 if ($('btnExpandCodeSidebar')) $('btnExpandCodeSidebar').onclick = () => { state.panelPrefs.codeSidebarCollapsed = false; applyPanelPrefs(); savePanelPrefs(); };
+if ($('btnToggleCodeSim')) {
+  $('btnToggleCodeSim').onclick = () => {
+    state.panelPrefs.codeSimCollapsed = !state.panelPrefs.codeSimCollapsed;
+    applyPanelPrefs();
+    savePanelPrefs();
+  };
+}
+if ($('btnCloseCodeSim')) {
+  $('btnCloseCodeSim').onclick = () => {
+    state.panelPrefs.codeSimCollapsed = true;
+    applyPanelPrefs();
+    savePanelPrefs();
+  };
+}
 if ($('btnResetLayout')) {
   $('btnResetLayout').onclick = () => {
     state.panelPrefs = { ...DEFAULT_PANEL_PREFS };
@@ -3569,7 +4718,7 @@ $('btnAutoArrange').onclick = () => {
     if (m.placed) { m.x = x; m.y = 28; x += 500; }
   }
   let lx = 28;
-  for (const b of state.looseBlocks) { b.x = lx; b.y = 430; lx += 270; }
+  for (const b of state.looseBlocks) { b.x = lx; b.y = 430; lx += 300; }
   $('blockCanvas').scrollTo({ left: 0, top: 0, behavior: 'smooth' });
   renderCanvas();
   saveCanvasLayout();
@@ -3578,12 +4727,13 @@ $('btnSyncFromCode').onclick = () => {
   parseAllMissionsFromFiles();
   renderPalette();
   renderCanvas();
-  if ($('visualCodePreview')) $('visualCodePreview').textContent = state.files[state.activeMissionFile] || '';
+  renderVisualCodePreview(state.files[state.activeMissionFile] || '', state.activeMissionFile);
   rebuildSimAndDraw(true);
 };
 $('btnClearBlocks').onclick = () => {
   if (!confirm(`ล้างคำสั่งทั้งหมดใน ${state.activeMissionFile}?`)) return;
-  state.missions[state.activeMissionFile].blocks = [];
+  const m = ensureMissionStructure(state.missions[state.activeMissionFile]);
+  if (m) m.sections = createEmptyMissionSections();
   renderCanvas();
   syncMissionToFile(state.activeMissionFile);
   saveCanvasLayout();
@@ -3600,37 +4750,52 @@ $('btnReadCalHostCom').onclick = readCalibrationHostCom;
 $('btnSyncCalFromConfig').onclick = syncCalFromConfigIno;
 $('btnApplyCalToConfig').onclick = applyCalToConfigIno;
 
-$('btnSimPlay').onclick = () => {
-  if (state.sim.playing) {
-    state.sim.playing = false;
-    setBtnContent($('btnSimPlay'), 'play', 'Run', 'sm');
-    return;
-  }
-  if (state.sim.segIdx >= state.sim.segments.length) rebuildSimAndDraw(true);
-  state.sim.playing = true;
-  state.sim.lastTs = 0;
-  setBtnContent($('btnSimPlay'), 'pause', 'Pause', 'sm');
-  state.sim.rafId = requestAnimationFrame(stepSimulatorFrame);
-};
-$('btnSimStep').onclick = () => {
-  state.sim.playing = false;
-  setBtnContent($('btnSimPlay'), 'play', 'Run', 'sm');
-  if (state.sim.segIdx >= state.sim.segments.length) { rebuildSimAndDraw(true); return; }
-  const seg = state.sim.segments[state.sim.segIdx];
-  state.sim.robotX = seg.tx;
-  state.sim.robotY = seg.ty;
-  state.sim.robotH = seg.th;
-  state.sim.elapsedMs = seg.endMs;
-  state.sim.activeBlockIndex = seg.blockIdx;
-  state.sim.segIdx++;
-  state.sim.segProgress = 0;
-  renderCanvas();
-  drawSimulator(state);
-};
-$('btnSimReset').onclick = () => rebuildSimAndDraw(true);
+$('btnSimPlay').onclick = toggleSimPlay;
+$('btnSimStep').onclick = stepSimOnce;
+$('btnSimReset').onclick = resetSimPose;
+if ($('btnCodeSimPlay')) $('btnCodeSimPlay').onclick = toggleSimPlay;
+if ($('btnCodeSimStep')) $('btnCodeSimStep').onclick = stepSimOnce;
+if ($('btnCodeSimReset')) $('btnCodeSimReset').onclick = resetSimPose;
 ['simCellSizeCm', 'simGridCols', 'simGridRows', 'simStartCol', 'simStartRow', 'simStartHeading'].forEach((id) => {
-  $(id).onchange = () => rebuildSimAndDraw(true);
+  $(id).onchange = () => {
+    if (id === 'simCellSizeCm' || id === 'simGridCols' || id === 'simGridRows') {
+      const nextRows = Math.max(2, Math.min(24, parseInt($('simGridRows')?.value, 10) || state.fieldMap.rows));
+      const nextCols = Math.max(2, Math.min(24, parseInt($('simGridCols')?.value, 10) || state.fieldMap.cols));
+      const nextCm = Math.max(5, Math.min(200, parseFloat($('simCellSizeCm')?.value) || state.fieldMap.tileWidthCm));
+      state.fieldMap.gridData = resizeGridData(state.fieldMap.gridData, nextRows, nextCols);
+      state.fieldMap.rows = nextRows;
+      state.fieldMap.cols = nextCols;
+      state.fieldMap.tileWidthCm = nextCm;
+      saveFieldMapToStorage();
+      mapManager.refreshFromExternal();
+    }
+    rebuildSimAndDraw(true);
+  };
 });
+
+if ($('btnSimViewMode')) $('btnSimViewMode').onclick = toggleSimViewMode;
+if ($('btnCodeSimViewMode')) $('btnCodeSimViewMode').onclick = toggleSimViewMode;
+if ($('btnSimRotateIso')) $('btnSimRotateIso').onclick = rotateSimIsoCamera;
+if ($('btnCodeSimRotateIso')) $('btnCodeSimRotateIso').onclick = rotateSimIsoCamera;
+if ($('btnSimSyncStart')) {
+  $('btnSimSyncStart').onclick = () => {
+    if (syncSimStartFromFieldStartTile()) {
+      rebuildSimAndDraw(true);
+      appendConsole('[OK] ซิงก์ตำแหน่งหุ่นยนต์ไปที่แผ่น START (#31) เรียบร้อย');
+    } else {
+      appendConsole('[WARN] ไม่พบแผ่น START (#31) บนสนาม — ใช้ค่า Start X/Y ปัจจุบัน');
+    }
+  };
+}
+if ($('btnOpenMapManager')) {
+  $('btnOpenMapManager').onclick = () => switchMode('map');
+}
+if ($('btnTopQuickScan')) {
+  $('btnTopQuickScan').onclick = openQuickFieldScan;
+}
+if ($('btnSimQuickScan')) {
+  $('btnSimQuickScan').onclick = openQuickFieldScan;
+}
 
 if ($('btnToggleAutoSave')) $('btnToggleAutoSave').onclick = toggleAutoSave;
 if ($('btnOpenVersions')) $('btnOpenVersions').onclick = openVersionModal;

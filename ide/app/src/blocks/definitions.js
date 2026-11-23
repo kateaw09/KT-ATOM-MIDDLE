@@ -10,6 +10,19 @@ export const MISSION_DEFS = [
 
 export const MISSION_MAP = Object.fromEntries(MISSION_DEFS.map((m) => [m.file, m]));
 
+export const MISSION_SECTIONS = [
+  { id: 'Box1', label: 'Box 1', accent: '#0ea5e9' },
+  { id: 'Box2', label: 'Box 2', accent: '#10b981' },
+  { id: 'Box3', label: 'Box 3', accent: '#f59e0b' },
+  { id: 'Box4', label: 'Box 4', accent: '#a855f7' },
+  { id: 'EndMission', label: 'EndMission', accent: '#f43f5e' }
+];
+
+export function getMissionSectionFnName(filename, sectionId) {
+  const modeNum = filename.match(/RunMode(\d)/)?.[1] || '1';
+  return modeNum === '1' ? sectionId : `M${modeNum}_${sectionId}`;
+}
+
 export const CATEGORIES = [
   { id: 'all', label: 'All Blocks', icon: 'blocks', color: '#38bdf8' },
   { id: 'mission', label: 'Missions', icon: 'play', color: '#0f766e' },
@@ -266,7 +279,7 @@ export function buildCommandDefs(getVariables) {
       cat: 'line',
       title: 'SetF',
       sig: "SetF(speed, backCm, 'R')",
-      desc: 'จัดเส้นหน้า -> ถอย -> หมุน/เลี้ยว',
+      desc: 'จัดเส้นหน้า -> ถอย -> หมุน Spin 90°',
       defaults: { speed: 25, cm: 10, dir: 'R' },
       fields: [
         { key: 'speed', label: 'spd', type: 'number' },
@@ -303,7 +316,7 @@ export function buildCommandDefs(getVariables) {
       cat: 'line',
       title: 'SetB',
       sig: "SetB(speed, fwdCm, 'L')",
-      desc: 'จัดเส้นหลัง -> เดินออก -> หมุน/เลี้ยว',
+      desc: 'จัดเส้นหลัง -> เดินออก -> หมุน Spin 90°',
       defaults: { speed: 25, cm: 10, dir: 'L' },
       fields: [
         { key: 'speed', label: 'spd', type: 'number' },
@@ -421,6 +434,7 @@ export const CONFIG_SECTIONS = [
   { id: 'mode', title: 'โหมดการทำงานเริ่มต้น (Boot & Run Mode)' },
   { id: 'pd', title: 'จูนความตรง Gyro PD (เดินหน้า / ถอยหลัง)' },
   { id: 'spin', title: 'จูนการหมุนอยู่กับที่และเลี้ยว Pivot (Gyro Spin & Turn)' },
+  { id: 'turnComp', title: 'ชดเชยระยะเข้า-ออกโค้งอัตโนมัติ (Swing Turn Distance Comp)' },
   { id: 'servo', title: 'เวลาหน่วงเซอร์โว (Servo Timing)' },
   { id: 'overwrite', title: 'เขียนทับค่า Flash สำรอง (ใช้เมื่อจอเสีย / อ่านค่าผ่านจอไม่ได้)' }
 ];
@@ -447,6 +461,9 @@ export const CONFIG_FIELDS = [
   { section: 'spin', key: 'threshold_spinDegree', label: 'threshold_spinDegree', hint: 'ระยะองศาหยุดเข้าเป้า Spin', type: 'number', step: 0.1 },
   { section: 'spin', key: 'smallAngle_threshold', label: 'smallAngle_threshold', hint: 'องศาที่เริ่มชะลอความเร็วหมุน', type: 'number', step: 1 },
   { section: 'spin', key: 'smallAngle_turnDegree', label: 'smallAngle_turnDegree', hint: 'ความละเอียดหยุด Pivot', type: 'number', step: 0.1 },
+  { section: 'turnComp', key: 'enableTurnDistComp', label: 'enableTurnDistComp', hint: 'เปิดชดเชยระยะก่อนเข้าโค้งและหลังออกโค้ง Swing Turn อัตโนมัติ (FC/BC/FC4/BC4)', type: 'bool', default: true },
+  { section: 'turnComp', key: 'turnEntryCompCm', label: 'turnEntryCompCm', hint: 'ระยะลดก่อนเริ่มเลี้ยว Swing 90° (ซม.) — สเกลอัตโนมัติสำหรับ 45° (x0.414)', type: 'number', min: 0, max: 18, step: 0.1, default: 6.8 },
+  { section: 'turnComp', key: 'turnExitRadiusCm', label: 'turnExitRadiusCm', hint: 'รัศมีโค้งฐานช่วงออกเลี้ยว Swing 90° (ซม.) + บวกระยะ Roll-Out สดจาก Encoder', type: 'number', min: 0, max: 18, step: 0.1, default: 6.3 },
   { section: 'servo', key: 'servoDropDelayMs', label: 'servoDropDelayMs', hint: 'เวลาหน่วงรอหลังสั่งปล่อยเซอร์โว (ms)', type: 'number', min: 50, max: 2000 },
   { section: 'overwrite', isToggle: true, key: 'forceOverwriteFlashFromCode', label: 'forceOverwriteFlashFromCode', hint: 'เปิด true เฉพาะเมื่อต้องการเขียนทับค่าใน Flash จากรายการสำรองด้านล่างนี้', type: 'bool' },
   { section: 'overwrite', requiresOverwrite: true, key: 'ticksPerCm', label: 'ticksPerCm', hint: 'จำนวน Ticks ต่อ 1 cm (จากการเข็น 30cm)', type: 'number', step: 0.01 },

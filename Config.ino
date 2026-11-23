@@ -9,7 +9,7 @@ Preferences cfgPrefs;
 // ============================================================================
 
 // --- 1.1 ตั้งค่าโหมดการทำงานหลัก ---
-bool enableMultiMode = false;   // true = กด B เปลี่ยนโหมด 1-3, กด A รัน | false = กด A หรือ B รันทันที
+bool enableMultiMode = true;   // true = กด B เปลี่ยนโหมด 1-3, กด A รัน | false = กด A หรือ B รันทันที
 int  currentRunMode  = 1;      // โหมดเริ่มต้น = 1 (มี 1, 2, 3)
 
 // --- 1.2 ค่า PID และพารามิเตอร์การเคลื่อนที่ (PT_MIDDLE_ENC_2026Endcode4 + KT_Optimize) ---
@@ -85,7 +85,9 @@ float turnExitRadiusCm         = 6.3f;   // รัศมีโค้งฐาน
 unsigned long delayALL = 0;    // หน่วงเวลาหลังคำสั่งเดินด้วยเวลา (ms)
 
 // --- 1.3 ค่าชดเชยความเร็วมอเตอร์และระยะทาง ---
-int motorTrim = -2;               // จูนความเร็วมอเตอร์ค่าเดียว: ลบ = ลดซ้าย, บวก = เพิ่มขวา
+int motorTrim = -2;               // จูนลดความเร็วมอเตอร์: ค่าลบ = ลดฝั่งซ้าย, ค่าบวก = ลดฝั่งขวา (0 = ไม่ลด)
+inline int getLeftMotorTrim()  { return (motorTrim < 0) ? motorTrim : 0; }
+inline int getRightMotorTrim() { return (motorTrim > 0) ? -motorTrim : 0; }
 
 // --- 1.4 เวลาหน่วงเซอร์โวตอนปล่อย (ใช้ร่วมกันทั้ง DropF และ DropB) ---
 int servoDropDelayMs = 200;    // หน่วยมิลลิวินาที (ms) (delayDrop 100 + 100 ms)
@@ -98,9 +100,12 @@ int servoDropDelayMs = 200;    // หน่วยมิลลิวินาท�
 bool forceOverwriteFlashFromCode = false;
 
 // --- 2.1 ค่าเดินตามระยะ Encoder ---
+const float TICKS_PER_CM_MIN     = 40.0f;
+const float TICKS_PER_CM_MAX     = 600.0f;
+const float CAL_TEST_DISTANCE_CM = 90.0f;
 float ticksPerCm   = 143.12f;  // Encoder Ticks ต่อ 1 ซม. (Full-Quad ล้อ 3.3 ซม.: 1300 / (PI * 3.3))
-int   distTuneMm   = 10;        // ค่าจูนชดเชยระยะเดินมอเตอร์ (หน่วย mm ต่อการเดิน 30 ซม.)
-int   calRun30cmMs = 431;     // เวลาที่หุ่นเดินจริง 30.0 ซม. ที่ความเร็ว 45 (หน่วย ms จากโหมด TEST 30 CM)
+int   distTuneMm   = 0;        // ค่าจูนชดเชยระยะเดินมอเตอร์ (คงไว้เพื่อรองรับ IDE/Flash เดิม; ปกติจูนผ่าน ticksPerCm โดยตรง)
+int   calRun30cmMs = 431;     // เวลาเทียบเท่าการเดิน 30.0 ซม. ที่ความเร็ว 45 (หน่วย ms จากโหมด TEST 90 CM)
 
 // --- 2.2 ค่าคาลิเบรตเซนเซอร์เส้น 4 ตัว (0=ซ้ายบน, 1=ขวาบน, 2=ขวาล่าง, 3=ซ้ายล่าง) ---
 int senMin[4]    = { 200, 200, 200, 200 };
@@ -224,10 +229,12 @@ void configLoad() {
     backLock   = cfgPrefs.getInt("block", backLock);
     backDrop   = cfgPrefs.getInt("bdrop", backDrop);
 
-    ticksPerCm   = cfgPrefs.getFloat("tpcm", ticksPerCm);
-    if (ticksPerCm < 80.0f) {
-        ticksPerCm = 125.40f;
+    float defaultTpcm = ticksPerCm;
+    float loadedTpcm  = cfgPrefs.getFloat("tpcm", defaultTpcm);
+    if (!isfinite(loadedTpcm) || loadedTpcm < TICKS_PER_CM_MIN || loadedTpcm > TICKS_PER_CM_MAX) {
+        loadedTpcm = defaultTpcm;
     }
+    ticksPerCm   = loadedTpcm;
     distTuneMm   = cfgPrefs.getInt("distmm", distTuneMm);
     calRun30cmMs = cfgPrefs.getInt("calms", calRun30cmMs);
     motorTrim    = cfgPrefs.getInt("mtrim", motorTrim);
@@ -301,4 +308,38 @@ void configSave() {
 
     cfgPrefs.end();
     configPrintCalibrationJson();
+}
+
+bool configSaveEncoderCalibration() {
+    if (!isfinite(ticksPerCm)) {
+        ticksPerCm = 125.40f;
+    }
+    ticksPerCm = constrain(ticksPerCm, TICKS_PER_CM_MIN, TICKS_PER_CM_MAX);
+
+    if (!cfgPrefs.begin("kt_robot", false)) {
+        return false;
+    }
+    size_t w1 = cfgPrefs.putFloat("tpcm", ticksPerCm);
+    size_t w2 = cfgPrefs.putInt("distmm", distTuneMm);
+    size_t w3 = cfgPrefs.putInt("calms", calRun30cmMs);
+    float verifyTpcm = cfgPrefs.getFloat("tpcm", -1.0f);
+    cfgPrefs.end();
+
+    bool ok = (w1 > 0 && w2 > 0 && w3 > 0 &&
+               isfinite(verifyTpcm) && fabsf(verifyTpcm - ticksPerCm) < 0.01f);
+    configPrintCalibrationJson();
+    return ok;
+}
+
+bool configSaveMotorTrim() {
+    if (!cfgPrefs.begin("kt_robot", false)) {
+        return false;
+    }
+    size_t w1 = cfgPrefs.putInt("mtrim", motorTrim);
+    int verifyTrim = cfgPrefs.getInt("mtrim", 999);
+    cfgPrefs.end();
+
+    bool ok = (w1 > 0 && verifyTrim == motorTrim);
+    configPrintCalibrationJson();
+    return ok;
 }
