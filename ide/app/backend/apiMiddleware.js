@@ -10,6 +10,11 @@ const PORT = Number(process.env.PORT || 3080);
 const FQBN = process.env.FQBN || 'PTBOT_ESP32:esp32:atom_vx';
 const IDE_DIR = path.resolve(__dirname, '..');
 const BUILD_DIR = process.env.BUILD_DIR || path.join(os.tmpdir(), 'kt-atom-ide-build');
+const MAIN_SKETCH_NAME = 'KT_ATOM_Middle';
+const MAIN_SKETCH_FILE = `${MAIN_SKETCH_NAME}.ino`;
+const PTBOT_CORE_ID = 'PTBOT_ESP32:esp32';
+const PTBOT_BOARD_INDEX_URL = 'https://raw.githubusercontent.com/pt-robotics/esp32/refs/heads/main/package_ptbot_index.json';
+const STAGE_SKETCH_DIR = path.join(os.tmpdir(), 'kt-atom-ide-sketch', MAIN_SKETCH_NAME);
 
 const EDITABLE_FILES = [
   'RunMode1.ino',
@@ -94,13 +99,13 @@ function firstExistingDir(candidates) {
 function findSketchDir() {
   const candidates = [
     process.env.SKETCH_DIR,
-    '/workspace/KT_ATOM_Middle',
     path.resolve(IDE_DIR, '..', '..'),
     path.resolve(IDE_DIR, '..'),
+    '/workspace/KT_ATOM_Middle',
     '/app/KT_ATOM_Middle'
   ];
   for (const dir of candidates) {
-    if (dir && fs.existsSync(path.join(dir, 'KT_ATOM_Middle.ino'))) {
+    if (dir && fs.existsSync(path.join(dir, MAIN_SKETCH_FILE))) {
       return dir;
     }
   }
@@ -122,7 +127,12 @@ function findArduinoCli() {
     process.env.ARDUINO_CLI,
     path.join(IDE_DIR, 'tools', localBinName),
     'C:\\Program Files\\Arduino IDE\\resources\\app\\lib\\backend\\resources\\arduino-cli.exe',
+    process.env.LOCALAPPDATA
+      ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Arduino IDE', 'resources', 'app', 'lib', 'backend', 'resources', 'arduino-cli.exe')
+      : '',
     path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Arduino IDE', 'resources', 'app', 'lib', 'backend', 'resources', 'arduino-cli.exe'),
+    '/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli',
+    '/opt/homebrew/bin/arduino-cli',
     '/usr/local/bin/arduino-cli',
     '/usr/bin/arduino-cli'
   ].filter(Boolean);
@@ -141,12 +151,22 @@ function findArduinoCli() {
 
 const SKETCH_DIR = findSketchDir();
 const LIBRARIES_DIR = findLibrariesDir(SKETCH_DIR);
-const ARDUINO_CLI = findArduinoCli();
+let ARDUINO_CLI = findArduinoCli();
 const VERSIONS_DIR = path.join(SKETCH_DIR, '.kt-versions');
+
+function getArduinoCli() {
+  if (!ARDUINO_CLI || (ARDUINO_CLI !== 'arduino-cli' && !fs.existsSync(ARDUINO_CLI))) {
+    ARDUINO_CLI = findArduinoCli();
+  } else if (ARDUINO_CLI === 'arduino-cli') {
+    const refreshed = findArduinoCli();
+    if (refreshed && refreshed !== 'arduino-cli') ARDUINO_CLI = refreshed;
+  }
+  return ARDUINO_CLI;
+}
 
 function checkArduinoCliAvailable() {
   try {
-    execFileSync(ARDUINO_CLI, ['version'], { encoding: 'utf8', timeout: 3000 });
+    execFileSync(getArduinoCli(), ['version'], { encoding: 'utf8', timeout: 3000 });
     return true;
   } catch (_) {
     return false;
@@ -308,20 +328,99 @@ function parseUsageMetrics(logText) {
   };
 }
 
+let cachedCliDataDir;
+
+function getArduino15Candidates() {
+  const list = [];
+  if (process.env.ARDUINO_DIRECTORIES_DATA) {
+    list.push(process.env.ARDUINO_DIRECTORIES_DATA);
+  }
+  if (cachedCliDataDir === undefined) {
+    cachedCliDataDir = '';
+    try {
+      const out = execFileSync(getArduinoCli(), ['config', 'get', 'directories.data'], {
+        encoding: 'utf8',
+        timeout: 3000
+      }).trim();
+      if (out) cachedCliDataDir = out.split(/\r?\n/)[0].trim();
+    } catch (_) {}
+  }
+  if (cachedCliDataDir) list.push(cachedCliDataDir);
+  if (process.env.LOCALAPPDATA) list.push(path.join(process.env.LOCALAPPDATA, 'Arduino15'));
+  list.push(
+    path.join(os.homedir(), 'AppData', 'Local', 'Arduino15'),
+    path.join(os.homedir(), 'Library', 'Arduino15'),
+    path.join(os.homedir(), '.arduino15'),
+    '/root/.arduino15'
+  );
+  return [...new Set(list.filter(Boolean))];
+}
+
 function findBootApp0() {
-  const roots = [
-    path.join(os.homedir(), 'AppData', 'Local', 'Arduino15', 'packages', 'PTBOT_ESP32', 'hardware', 'esp32'),
-    path.join(os.homedir(), '.arduino15', 'packages', 'PTBOT_ESP32', 'hardware', 'esp32'),
-    '/root/.arduino15/packages/PTBOT_ESP32/hardware/esp32'
-  ];
-  for (const r of roots) {
-    if (!fs.existsSync(r)) continue;
-    for (const ver of fs.readdirSync(r)) {
-      const candidate = path.join(r, ver, 'tools', 'partitions', 'boot_app0.bin');
+  for (const dataDir of getArduino15Candidates()) {
+    const esp32Dir = path.join(dataDir, 'packages', 'PTBOT_ESP32', 'hardware', 'esp32');
+    if (!fs.existsSync(esp32Dir)) continue;
+    for (const ver of fs.readdirSync(esp32Dir)) {
+      const candidate = path.join(esp32Dir, ver, 'tools', 'partitions', 'boot_app0.bin');
       if (fs.existsSync(candidate)) return candidate;
     }
   }
   return '';
+}
+
+function checkBoardCoreInstalled() {
+  for (const dataDir of getArduino15Candidates()) {
+    const esp32Dir = path.join(dataDir, 'packages', 'PTBOT_ESP32', 'hardware', 'esp32');
+    if (!fs.existsSync(esp32Dir)) continue;
+    try {
+      const entries = fs.readdirSync(esp32Dir, { withFileTypes: true });
+      if (entries.some((ent) => ent.isDirectory())) return true;
+    } catch (_) {}
+  }
+  try {
+    const out = execFileSync(getArduinoCli(), ['core', 'list'], { encoding: 'utf8', timeout: 5000 });
+    if (out.includes(PTBOT_CORE_ID)) return true;
+  } catch (_) {}
+  return false;
+}
+
+function resolveCompileSketchDir() {
+  // Arduino CLI requires the sketch directory basename to match KT_ATOM_Middle.ino;
+  // when cloned/downloaded as KT-ATOM-MIDDLE or KT-ATOM-MIDDLE-main, stage sources in temp.
+  if (path.basename(SKETCH_DIR) === MAIN_SKETCH_NAME) {
+    return { compileDir: SKETCH_DIR, staged: false };
+  }
+  fs.mkdirSync(STAGE_SKETCH_DIR, { recursive: true });
+  const srcExtRe = /\.(ino|h|hpp|c|cpp|cc|cxx|s)$/i;
+  const sourceNames = fs
+    .readdirSync(SKETCH_DIR, { withFileTypes: true })
+    .filter((ent) => ent.isFile() && srcExtRe.test(ent.name))
+    .map((ent) => ent.name);
+  const wanted = new Set(sourceNames);
+
+  for (const ent of fs.readdirSync(STAGE_SKETCH_DIR, { withFileTypes: true })) {
+    if (!wanted.has(ent.name)) {
+      fs.rmSync(path.join(STAGE_SKETCH_DIR, ent.name), { recursive: true, force: true });
+    }
+  }
+
+  for (const name of sourceNames) {
+    const srcPath = path.join(SKETCH_DIR, name);
+    const dstPath = path.join(STAGE_SKETCH_DIR, name);
+    const srcBuf = fs.readFileSync(srcPath);
+    let needsWrite = true;
+    if (fs.existsSync(dstPath)) {
+      try {
+        const dstBuf = fs.readFileSync(dstPath);
+        if (Buffer.compare(srcBuf, dstBuf) === 0) needsWrite = false;
+      } catch (_) {}
+    }
+    if (needsWrite) {
+      fs.writeFileSync(dstPath, srcBuf);
+    }
+  }
+
+  return { compileDir: STAGE_SKETCH_DIR, staged: true };
 }
 
 function listBuildArtifacts() {
@@ -358,7 +457,7 @@ async function listSerialPorts() {
   const seen = new Set();
 
   try {
-    const res = await runCommand(ARDUINO_CLI, ['board', 'list', '--format', 'json'], 8000);
+    const res = await runCommand(getArduinoCli(), ['board', 'list', '--format', 'json'], 8000);
     if (res.exitCode === 0 && res.stdout) {
       const parsed = JSON.parse(res.stdout);
       const detected = Array.isArray(parsed) ? parsed : (parsed.detected_ports || []);
@@ -816,8 +915,10 @@ function createApiMiddleware() {
         return sendJson(res, 200, {
           ok: true,
           fqbn: FQBN,
-          arduinoCli: ARDUINO_CLI,
+          arduinoCli: getArduinoCli(),
           arduinoCliAvailable: checkArduinoCliAvailable(),
+          boardCoreInstalled: checkBoardCoreInstalled(),
+          folderNameMatchesSketch: path.basename(SKETCH_DIR) === MAIN_SKETCH_NAME,
           sketchDir: SKETCH_DIR,
           librariesDir: LIBRARIES_DIR,
           buildDir: BUILD_DIR,
@@ -902,12 +1003,26 @@ function createApiMiddleware() {
             saveSketchUpdates(body);
           }
           fs.mkdirSync(BUILD_DIR, { recursive: true });
+          const cli = getArduinoCli();
+          const { compileDir, staged } = resolveCompileSketchDir();
           const args = ['compile', '--fqbn', FQBN, '--output-dir', BUILD_DIR];
           if (LIBRARIES_DIR) args.push('--libraries', LIBRARIES_DIR);
-          args.push(SKETCH_DIR);
+          args.push(compileDir);
 
-          const result = await runCommand(ARDUINO_CLI, args, 180000);
-          const log = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
+          const result = await runCommand(cli, args, 180000);
+          let log = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
+          if (staged) {
+            log = log.split(compileDir).join(SKETCH_DIR);
+          }
+          if (result.exitCode !== 0) {
+            const missingPlatform = /platform\s+'?PTBOT_ESP32:esp32'?\s+not\s+found|unknown\s+fqbn|no\s+matching\s+platform/i.test(log);
+            const missingCli = /ENOENT|not\s+recognized|command\s+not\s+found/i.test(log);
+            if (missingCli) {
+              log += '\n\n[HINT] ไม่พบ arduino-cli — กรุณารัน ide/start-ide.bat (Windows) หรือ node ide/app/setup-deps.js เพื่อติดตั้งอัตโนมัติ';
+            } else if (missingPlatform) {
+              log += `\n\n[HINT] ยังไม่ได้ติดตั้งบอร์ด ${PTBOT_CORE_ID} — กรุณารัน ide/start-ide.bat (หรือ node ide/app/setup-deps.js) โดยเชื่อมต่ออินเทอร์เน็ตครั้งแรก หรือเพิ่ม Board Manager URL ใน Arduino IDE:\n${PTBOT_BOARD_INDEX_URL}`;
+            }
+          }
           const usage = parseUsageMetrics(log);
 
           return sendJson(res, 200, {
@@ -969,8 +1084,9 @@ function createApiMiddleware() {
           return sendJson(res, 400, { ok: false, error: 'ยังไม่มีไฟล์ที่คอมไพล์แล้ว กรุณากด Compile ก่อน Upload' });
         }
         await releaseSerialPortLocks();
-        const args = ['upload', '-p', port, '--fqbn', FQBN, '--input-dir', BUILD_DIR, SKETCH_DIR];
-        const result = await runCommand(ARDUINO_CLI, args, 120000);
+        const { compileDir } = resolveCompileSketchDir();
+        const args = ['upload', '-p', port, '--fqbn', FQBN, '--input-dir', BUILD_DIR, compileDir];
+        const result = await runCommand(getArduinoCli(), args, 120000);
         const log = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
         return sendJson(res, 200, {
           ok: result.exitCode === 0,

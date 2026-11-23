@@ -23,8 +23,8 @@ setup_deps() {
     return 1
   fi
   cd "$APP_DIR"
-  if [ -f "package.json" ] && [ ! -d "node_modules" ] && command -v npm >/dev/null 2>&1; then
-    npm install --no-audit --no-fund --silent || true
+  if [ -f "package.json" ] && [ ! -f "node_modules/vite/package.json" ] && command -v npm >/dev/null 2>&1; then
+    npm install --no-audit --no-fund
   fi
   node "$APP_DIR/setup-deps.js"
 }

@@ -9,6 +9,8 @@ const { execFileSync } = require('child_process');
 const APP_DIR = __dirname;
 const IDE_DIR = path.resolve(APP_DIR, '..');
 const TOOLS_DIR = path.join(APP_DIR, 'tools');
+const PTBOT_CORE_ID = 'PTBOT_ESP32:esp32';
+const PTBOT_BOARD_INDEX_URL = 'https://raw.githubusercontent.com/pt-robotics/esp32/refs/heads/main/package_ptbot_index.json';
 
 function findSketchDir() {
   const candidates = [
@@ -30,7 +32,12 @@ function findArduinoCli() {
     process.env.ARDUINO_CLI,
     localBin,
     'C:\\Program Files\\Arduino IDE\\resources\\app\\lib\\backend\\resources\\arduino-cli.exe',
+    process.env.LOCALAPPDATA
+      ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Arduino IDE', 'resources', 'app', 'lib', 'backend', 'resources', 'arduino-cli.exe')
+      : '',
     path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Arduino IDE', 'resources', 'app', 'lib', 'backend', 'resources', 'arduino-cli.exe'),
+    '/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli',
+    '/opt/homebrew/bin/arduino-cli',
     '/usr/local/bin/arduino-cli',
     '/usr/bin/arduino-cli'
   ].filter(Boolean);
@@ -72,11 +79,11 @@ async function installStandaloneArduinoCli() {
   let url = '';
   let isZip = false;
   if (plat === 'win32') {
-    url = `https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Windows_${arch}.zip`;
+    // Arduino CLI does not publish Windows_ARM64; Windows_64bit runs on both x64 and ARM64.
+    url = 'https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Windows_64bit.zip';
     isZip = true;
   } else if (plat === 'darwin') {
-    const macArch = process.arch === 'arm64' ? 'arm64' : '64bit';
-    url = `https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_macOS_${macArch}.tar.gz`;
+    url = `https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_macOS_${arch}.tar.gz`;
   } else {
     url = `https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Linux_${arch}.tar.gz`;
   }
@@ -86,9 +93,11 @@ async function installStandaloneArduinoCli() {
   await downloadFile(url, archivePath);
 
   if (plat === 'win32') {
+    const escArchive = archivePath.replace(/'/g, "''");
+    const escDest = TOOLS_DIR.replace(/'/g, "''");
     execFileSync(
       'powershell.exe',
-      ['-NoProfile', '-Command', `Expand-Archive -Path '${archivePath}' -DestinationPath '${TOOLS_DIR}' -Force`],
+      ['-NoProfile', '-Command', `Expand-Archive -Path '${escArchive}' -DestinationPath '${escDest}' -Force`],
       { stdio: 'inherit', timeout: 60000 }
     );
   } else {
@@ -101,6 +110,106 @@ async function installStandaloneArduinoCli() {
     fs.chmodSync(binPath, 0o755);
   }
   return fs.existsSync(binPath) ? binPath : '';
+}
+
+function isPtbotCoreInstalled(cli) {
+  if (cli) {
+    try {
+      const out = execFileSync(cli, ['core', 'list'], { encoding: 'utf8', timeout: 10000 });
+      if (out.includes(PTBOT_CORE_ID)) return true;
+    } catch (_) {}
+  }
+
+  const dataRoots = [
+    process.env.ARDUINO_DIRECTORIES_DATA,
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Arduino15') : '',
+    path.join(os.homedir(), 'AppData', 'Local', 'Arduino15'),
+    path.join(os.homedir(), 'Library', 'Arduino15'),
+    path.join(os.homedir(), '.arduino15'),
+    '/root/.arduino15'
+  ].filter(Boolean);
+
+  for (const dataDir of dataRoots) {
+    const esp32Dir = path.join(dataDir, 'packages', 'PTBOT_ESP32', 'hardware', 'esp32');
+    if (!fs.existsSync(esp32Dir)) continue;
+    try {
+      const entries = fs.readdirSync(esp32Dir, { withFileTypes: true });
+      if (entries.some((ent) => ent.isDirectory())) return true;
+    } catch (_) {}
+  }
+  return false;
+}
+
+function ensurePtbotCore(cli) {
+  if (!cli) return false;
+  if (isPtbotCoreInstalled(cli)) {
+    console.log('[OK] PTBOT_ESP32:esp32 board core is installed locally (100% offline ready).');
+    return true;
+  }
+
+  console.log('[INFO] PTBOT_ESP32:esp32 board core not found — installing automatically (first-time download)...');
+  try {
+    execFileSync(cli, ['config', 'init'], { stdio: 'ignore', timeout: 15000 });
+  } catch (_) {}
+  try {
+    execFileSync(cli, ['config', 'add', 'board_manager.additional_urls', PTBOT_BOARD_INDEX_URL], {
+      stdio: 'ignore',
+      timeout: 15000
+    });
+  } catch (_) {}
+
+  try {
+    execFileSync(cli, ['core', 'update-index', '--additional-urls', PTBOT_BOARD_INDEX_URL], {
+      stdio: 'inherit',
+      timeout: 300000
+    });
+    execFileSync(cli, ['core', 'install', PTBOT_CORE_ID, '--additional-urls', PTBOT_BOARD_INDEX_URL], {
+      stdio: 'inherit',
+      timeout: 600000
+    });
+  } catch (err) {
+    console.log(`[WARN] Auto-install of ${PTBOT_CORE_ID} failed (${err.message}).`);
+  }
+
+  if (isPtbotCoreInstalled(cli)) {
+    console.log('[OK] PTBOT_ESP32:esp32 board core installed successfully.');
+    return true;
+  }
+
+  console.log(`[WARN] PTBOT_ESP32:esp32 board core is still missing. Ensure internet access on first run or add URL in Arduino IDE: ${PTBOT_BOARD_INDEX_URL}`);
+  return false;
+}
+
+function syncBundledManagerLibrary(sketchDir, cli) {
+  const src = path.join(sketchDir, 'libraries', 'KT_ATIOM_VX_MANAGER');
+  if (!fs.existsSync(src)) return;
+
+  let userArduinoDir = '';
+  if (cli) {
+    try {
+      const out = execFileSync(cli, ['config', 'get', 'directories.user'], {
+        encoding: 'utf8',
+        timeout: 5000
+      }).trim();
+      if (out) userArduinoDir = out.split(/\r?\n/)[0].trim();
+    } catch (_) {}
+  }
+  if (!userArduinoDir) {
+    userArduinoDir = process.platform === 'linux'
+      ? path.join(os.homedir(), 'Arduino')
+      : path.join(os.homedir(), 'Documents', 'Arduino');
+  }
+
+  const dst = path.join(userArduinoDir, 'libraries', 'KT_ATIOM_VX_MANAGER');
+  if (path.resolve(src).toLowerCase() === path.resolve(dst).toLowerCase()) return;
+
+  try {
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.cpSync(src, dst, { recursive: true, force: true });
+    console.log(`[OK] Synced KT_ATIOM_VX_MANAGER library to ${dst} (ready for Arduino IDE too).`);
+  } catch (err) {
+    console.log(`[WARN] Could not sync KT_ATIOM_VX_MANAGER to ${dst} (${err.message}).`);
+  }
 }
 
 async function main() {
@@ -152,19 +261,13 @@ async function main() {
     try {
       const ver = execFileSync(cli, ['version'], { encoding: 'utf8', timeout: 8000 }).trim();
       console.log(`[OK] Arduino CLI: ${cli} (${ver})`);
-      const corePaths = [
-        path.join(os.homedir(), 'AppData', 'Local', 'Arduino15', 'packages', 'PTBOT_ESP32'),
-        path.join(os.homedir(), '.arduino15', 'packages', 'PTBOT_ESP32')
-      ];
-      if (corePaths.some((p) => fs.existsSync(p))) {
-        console.log('[OK] PTBOT_ESP32:esp32 board core is installed locally (100% offline ready).');
-      } else {
-        console.log('[WARN] PTBOT_ESP32:esp32 board core folder not found in Arduino15/packages.');
-      }
+      ensurePtbotCore(cli);
     } catch (err) {
       console.log(`[WARN] Arduino CLI check warning: ${err.message}`);
     }
   }
+
+  syncBundledManagerLibrary(sketchDir, cli);
 
   console.log('[OK] Setup complete! KT Middle IDE is ready to launch.');
 }
