@@ -628,12 +628,13 @@ finally:
 }
 
 function sendJson(res, statusCode, data) {
-  const body = JSON.stringify(data);
+  const buf = Buffer.from(JSON.stringify(data), 'utf8');
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': buf.length,
     'Cache-Control': 'no-store'
   });
-  res.end(body);
+  res.end(buf);
 }
 
 function readJsonBody(req, limitBytes = 25 * 1024 * 1024) {
@@ -662,6 +663,8 @@ function readJsonBody(req, limitBytes = 25 * 1024 * 1024) {
 }
 
 // Local Git-Like Version Control Store (.kt-versions on host disk)
+const ACTIVE_VERSION_FILE = path.join(VERSIONS_DIR, 'active.json');
+
 function ensureVersionsDir() {
   if (!fs.existsSync(VERSIONS_DIR)) {
     fs.mkdirSync(VERSIONS_DIR, { recursive: true });
@@ -691,33 +694,171 @@ function sanitizeImageExt(mimeOrName) {
   return '.png';
 }
 
-function saveDataUrlImage(imagesDir, index, imgObj) {
+function parseDataUrlImage(imgObj) {
   if (!imgObj || typeof imgObj.dataUrl !== 'string') return null;
   const match = imgObj.dataUrl.match(/^data:(image\/[A-Za-z0-9.+-]+);base64,(.+)$/);
   if (!match) return null;
-  const mime = match[1];
-  const ext = sanitizeImageExt(mime || imgObj.name);
+  const ext = sanitizeImageExt(match[1] || imgObj.name);
+  return { ext, buf: Buffer.from(match[2], 'base64') };
+}
+
+function saveDataUrlImage(imagesDir, index, imgObj) {
+  const parsed = parseDataUrlImage(imgObj);
+  if (!parsed) return null;
   const rawName = String(imgObj.name || `photo_${index + 1}`)
     .replace(/\.[^.]+$/, '')
     .replace(/[^A-Za-z0-9_-]+/g, '_')
     .slice(0, 32) || `img_${index + 1}`;
-  const filename = `${Date.now()}_${index + 1}_${rawName}${ext}`;
+  const filename = `${Date.now()}_${index + 1}_${rawName}${parsed.ext}`;
   const fullPath = path.join(imagesDir, filename);
-  fs.writeFileSync(fullPath, Buffer.from(match[2], 'base64'));
+  fs.writeFileSync(fullPath, parsed.buf);
   return {
     filename,
     originalName: String(imgObj.name || filename),
-    size: fs.statSync(fullPath).size,
+    size: parsed.buf.length,
     addedAt: new Date().toISOString()
   };
 }
 
-function decorateVersionMeta(meta) {
-  const images = (meta.images || []).map((img) => ({
-    ...img,
-    url: `/api/versions/${encodeURIComponent(meta.id)}/image/${encodeURIComponent(img.filename)}`
-  }));
-  return { ...meta, images };
+function saveCoverImage(verDir, coverObj) {
+  const parsed = parseDataUrlImage(coverObj);
+  if (!parsed) return null;
+  for (const ext of ['.png', '.jpg', '.webp', '.gif']) {
+    const oldPath = path.join(verDir, `cover${ext}`);
+    if (ext !== parsed.ext && fs.existsSync(oldPath)) {
+      try { fs.unlinkSync(oldPath); } catch (_) {}
+    }
+  }
+  const filename = `cover${parsed.ext}`;
+  const fullPath = path.join(verDir, filename);
+  fs.writeFileSync(fullPath, parsed.buf);
+  return {
+    filename,
+    size: parsed.buf.length,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function splitNormalizedLines(text) {
+  if (!text) return [];
+  return String(text).replace(/\r\n/g, '\n').split('\n');
+}
+
+function computeFileLineDiff(oldText, newText) {
+  const a = splitNormalizedLines(oldText);
+  const b = splitNormalizedLines(newText);
+  let p = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let s = 0;
+  while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+
+  const am = a.slice(p, a.length - s);
+  const bm = b.slice(p, b.length - s);
+  const m = am.length;
+  const n = bm.length;
+
+  if (m === 0 && n === 0) {
+    return { added: 0, removed: 0, diffLines: [], preview: [] };
+  }
+
+  const ops = [];
+  if (m * n <= 160000) {
+    const cols = n + 1;
+    const dp = new Int32Array((m + 1) * cols);
+    for (let i = m - 1; i >= 0; i--) {
+      const rowOff = i * cols;
+      const nextRowOff = (i + 1) * cols;
+      for (let j = n - 1; j >= 0; j--) {
+        dp[rowOff + j] = am[i] === bm[j]
+          ? dp[nextRowOff + j + 1] + 1
+          : Math.max(dp[nextRowOff + j], dp[rowOff + j + 1]);
+      }
+    }
+    let i = 0;
+    let j = 0;
+    while (i < m && j < n) {
+      if (am[i] === bm[j]) {
+        ops.push({ type: 'ctx', text: am[i], oldLine: p + i + 1, newLine: p + j + 1 });
+        i++;
+        j++;
+      } else if (dp[(i + 1) * cols + j] >= dp[i * cols + j + 1]) {
+        ops.push({ type: 'del', text: am[i], oldLine: p + i + 1 });
+        i++;
+      } else {
+        ops.push({ type: 'add', text: bm[j], newLine: p + j + 1 });
+        j++;
+      }
+    }
+    while (i < m) {
+      ops.push({ type: 'del', text: am[i], oldLine: p + i + 1 });
+      i++;
+    }
+    while (j < n) {
+      ops.push({ type: 'add', text: bm[j], newLine: p + j + 1 });
+      j++;
+    }
+  } else {
+    for (let i = 0; i < m; i++) ops.push({ type: 'del', text: am[i], oldLine: p + i + 1 });
+    for (let j = 0; j < n; j++) ops.push({ type: 'add', text: bm[j], newLine: p + j + 1 });
+  }
+
+  let added = 0;
+  let removed = 0;
+  const preview = [];
+  const diffLines = [];
+  for (const op of ops) {
+    if (op.type === 'add') added++;
+    else if (op.type === 'del') removed++;
+    if (op.type !== 'ctx' && preview.length < 6 && op.text.trim()) {
+      const prefix = op.type === 'add' ? '+ ' : '- ';
+      preview.push(`${prefix}${op.text.trim().slice(0, 94)}`);
+    }
+    if (diffLines.length < 200) {
+      diffLines.push(op);
+    }
+  }
+
+  return { added, removed, diffLines, preview };
+}
+
+function summarizeFileChanges(prevFiles = {}, nextFiles = {}, prevGrid = undefined, nextGrid = undefined) {
+  const changedFiles = [];
+  const changeSummary = [];
+  let totalAdded = 0;
+  let totalRemoved = 0;
+
+  for (const fname of EDITABLE_FILES) {
+    const hasPrev = typeof prevFiles[fname] === 'string';
+    const hasNext = typeof nextFiles[fname] === 'string';
+    if (!hasPrev && !hasNext) continue;
+    const oldText = prevFiles[fname] || '';
+    const newText = nextFiles[fname] || '';
+    if (oldText === newText) continue;
+
+    const diff = computeFileLineDiff(oldText, newText);
+    changedFiles.push(fname);
+    totalAdded += diff.added;
+    totalRemoved += diff.removed;
+    changeSummary.push({
+      file: fname,
+      added: diff.added,
+      removed: diff.removed,
+      preview: diff.preview
+    });
+  }
+
+  if (prevGrid !== undefined && nextGrid !== undefined && JSON.stringify(prevGrid || null) !== JSON.stringify(nextGrid || null)) {
+    changedFiles.push('Field Map');
+    totalAdded += 1;
+    changeSummary.push({
+      file: 'Field Map',
+      added: 1,
+      removed: 0,
+      preview: ['ปรับปรุงผังสนาม (Map Manager)']
+    });
+  }
+
+  return { changedFiles, changeSummary, totalAdded, totalRemoved };
 }
 
 function listRawVersionsSorted() {
@@ -732,20 +873,133 @@ function listRawVersionsSorted() {
       list.push(JSON.parse(fs.readFileSync(metaPath, 'utf8')));
     } catch (_) {}
   }
-  list.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+
+  // Assign deterministic majorNumber (v1, v2, ...) chronologically if missing
+  const asc = [...list].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  let maxAssigned = 0;
+  for (const m of asc) {
+    const n = Number(m.majorNumber);
+    if (Number.isInteger(n) && n > maxAssigned) maxAssigned = n;
+  }
+  let fallbackCounter = 1;
+  for (const m of asc) {
+    if (!Number.isInteger(Number(m.majorNumber)) || Number(m.majorNumber) <= 0) {
+      while (asc.some((other) => other !== m && Number(other.majorNumber) === fallbackCounter)) {
+        fallbackCounter++;
+      }
+      m.majorNumber = fallbackCounter++;
+    }
+    if (!m.versionLabel) m.versionLabel = `v${m.majorNumber}`;
+  }
+
+  list.sort((a, b) => {
+    const cmp = String(b.createdAt).localeCompare(String(a.createdAt));
+    return cmp !== 0 ? cmp : (Number(b.majorNumber) || 0) - (Number(a.majorNumber) || 0);
+  });
   return list;
+}
+
+function readActiveVersionState(rawList = null) {
+  ensureVersionsDir();
+  const list = rawList || listRawVersionsSorted();
+  const validIds = new Set(list.map((v) => v.id));
+  let saved = null;
+  if (fs.existsSync(ACTIVE_VERSION_FILE)) {
+    try {
+      saved = JSON.parse(fs.readFileSync(ACTIVE_VERSION_FILE, 'utf8'));
+    } catch (_) {}
+  }
+  if (saved && isSafeVersionId(saved.activeVersionId) && validIds.has(saved.activeVersionId)) {
+    let activeSubVersionId = null;
+    if (isSafeVersionId(saved.activeSubVersionId)) {
+      const subPath = path.join(VERSIONS_DIR, saved.activeVersionId, 'subversions', `${saved.activeSubVersionId}.json`);
+      if (fs.existsSync(subPath)) activeSubVersionId = saved.activeSubVersionId;
+    }
+    return { activeVersionId: saved.activeVersionId, activeSubVersionId };
+  }
+  const newest = list[0];
+  return { activeVersionId: newest ? newest.id : null, activeSubVersionId: null };
+}
+
+function writeActiveVersionState(activeVersionId, activeSubVersionId = null) {
+  ensureVersionsDir();
+  fs.writeFileSync(
+    ACTIVE_VERSION_FILE,
+    JSON.stringify({ activeVersionId: activeVersionId || null, activeSubVersionId: activeSubVersionId || null }, null, 2),
+    'utf8'
+  );
+}
+
+function decorateVersionMeta(meta) {
+  const majorNumber = Number(meta.majorNumber) || 1;
+  const versionLabel = meta.versionLabel || `v${majorNumber}`;
+  const images = (meta.images || []).map((img) => ({
+    ...img,
+    url: `/api/versions/${encodeURIComponent(meta.id)}/image/${encodeURIComponent(img.filename)}`
+  }));
+
+  let coverUrl = null;
+  if (meta.cover?.filename) {
+    const coverPath = path.join(VERSIONS_DIR, meta.id, path.basename(meta.cover.filename));
+    if (fs.existsSync(coverPath)) {
+      const verStamp = encodeURIComponent(meta.cover.updatedAt || meta.createdAt || '');
+      coverUrl = `/api/versions/${encodeURIComponent(meta.id)}/cover?t=${verStamp}`;
+    }
+  } else if (images.length > 0) {
+    const legacyImgPath = path.join(VERSIONS_DIR, meta.id, 'images', path.basename(images[0].filename));
+    if (fs.existsSync(legacyImgPath)) {
+      coverUrl = images[0].url;
+    }
+  }
+
+  const subVersions = [...(meta.subVersions || [])]
+    .sort((a, b) => (Number(b.seq) || 0) - (Number(a.seq) || 0))
+    .map((sub) => ({
+      ...sub,
+      versionLabel: sub.versionLabel || `v${majorNumber}.${sub.seq || 1}`
+    }));
+
+  return {
+    ...meta,
+    majorNumber,
+    versionLabel,
+    coverUrl,
+    images,
+    subVersions,
+    subVersionCount: subVersions.length
+  };
+}
+
+function getLatestCheckpointForVersion(verId) {
+  const { meta, snapshot } = getVersionDetail(verId);
+  if (Array.isArray(meta.subVersions) && meta.subVersions.length > 0) {
+    const latestSub = [...meta.subVersions].sort((a, b) => (Number(b.seq) || 0) - (Number(a.seq) || 0))[0];
+    const subPath = path.join(VERSIONS_DIR, verId, 'subversions', `${latestSub.id}.json`);
+    if (fs.existsSync(subPath)) {
+      try {
+        const subSnap = JSON.parse(fs.readFileSync(subPath, 'utf8'));
+        return {
+          files: subSnap.files || {},
+          compactGrid: subSnap.simSettings?.compactGrid
+        };
+      } catch (_) {}
+    }
+  }
+  return {
+    files: snapshot.files || {},
+    compactGrid: snapshot.simSettings?.compactGrid
+  };
 }
 
 function listVersions() {
   let list = listRawVersionsSorted();
   if (list.length === 0) {
-    const initial = createVersionSnapshot({
+    createVersionSnapshot({
       title: 'Initial Workspace Baseline',
       description: 'จุดเริ่มต้นอัตโนมัติของโปรเจกต์ก่อนเริ่มแก้ไข',
-      tag: 'baseline',
-      images: []
+      tag: 'baseline'
     });
-    list = [initial];
+    list = listRawVersionsSorted();
   }
   return list.map(decorateVersionMeta);
 }
@@ -764,16 +1018,24 @@ function createVersionSnapshot(payload = {}) {
   }
 
   const prevList = listRawVersionsSorted();
+  const nextMajor = prevList.reduce((mx, v) => Math.max(mx, Number(v.majorNumber) || 0), 0) + 1;
+  const versionLabel = `v${nextMajor}`;
+
   let changedFiles = Object.keys(snapshotFiles);
+  let changeSummary = [];
+  let totalAdded = 0;
+  let totalRemoved = 0;
   if (prevList.length > 0) {
-    const prevSnapPath = path.join(VERSIONS_DIR, prevList[0].id, 'snapshot.json');
-    if (fs.existsSync(prevSnapPath)) {
-      try {
-        const prevSnap = JSON.parse(fs.readFileSync(prevSnapPath, 'utf8'));
-        const prevFiles = prevSnap.files || {};
-        changedFiles = Object.keys(snapshotFiles).filter((f) => snapshotFiles[f] !== prevFiles[f]);
-      } catch (_) {}
-    }
+    try {
+      const active = readActiveVersionState(prevList);
+      const baseId = active.activeVersionId || prevList[0].id;
+      const baseCp = getLatestCheckpointForVersion(baseId);
+      const summary = summarizeFileChanges(baseCp.files, snapshotFiles, baseCp.compactGrid, payload.simSettings?.compactGrid);
+      changedFiles = summary.changedFiles;
+      changeSummary = summary.changeSummary;
+      totalAdded = summary.totalAdded;
+      totalRemoved = summary.totalRemoved;
+    } catch (_) {}
   }
 
   const createdAt = new Date().toISOString();
@@ -795,8 +1057,9 @@ function createVersionSnapshot(payload = {}) {
       if (saved) savedImages.push(saved);
     });
   }
+  const cover = saveCoverImage(verDir, payload.coverImage);
 
-  const title = String(payload.title || '').trim() || `Snapshot ${hash}`;
+  const title = String(payload.title || '').trim() || `Snapshot ${versionLabel} (${hash})`;
   const description = String(payload.description || '').trim();
   const tag = String(payload.tag || '').trim();
 
@@ -811,19 +1074,28 @@ function createVersionSnapshot(payload = {}) {
   const meta = {
     id,
     hash,
+    majorNumber: nextMajor,
+    versionLabel,
     title,
     description,
     tag,
     createdAt,
     changedFiles,
+    changeSummary,
+    totalAdded,
+    totalRemoved,
     fileCount: Object.keys(snapshotFiles).length,
     totalLines,
     blockSummary: payload.blockSummary || '',
-    images: savedImages
+    cover,
+    images: savedImages,
+    subVersions: [],
+    subVersionCount: 0
   };
 
   fs.writeFileSync(path.join(verDir, 'snapshot.json'), JSON.stringify(snapshot, null, 2), 'utf8');
   fs.writeFileSync(path.join(verDir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf8');
+  writeActiveVersionState(id, null);
   return decorateVersionMeta(meta);
 }
 
@@ -835,7 +1107,9 @@ function getVersionDetail(id) {
   if (!fs.existsSync(metaPath) || !fs.existsSync(snapPath)) {
     throw new Error('Version not found');
   }
-  const meta = decorateVersionMeta(JSON.parse(fs.readFileSync(metaPath, 'utf8')));
+  const rawList = listRawVersionsSorted();
+  const matched = rawList.find((m) => m.id === id) || JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  const meta = decorateVersionMeta(matched);
   const snapshot = JSON.parse(fs.readFileSync(snapPath, 'utf8'));
   return { meta, snapshot };
 }
@@ -846,11 +1120,20 @@ function updateVersion(id, payload = {}) {
   const imagesDir = path.join(verDir, 'images');
   fs.mkdirSync(imagesDir, { recursive: true });
 
-  if (payload.title !== undefined) meta.title = String(payload.title).trim() || meta.title;
-  if (payload.description !== undefined) meta.description = String(payload.description).trim();
-  if (payload.tag !== undefined) meta.tag = String(payload.tag).trim();
+  const rawMeta = JSON.parse(fs.readFileSync(path.join(verDir, 'meta.json'), 'utf8'));
+  rawMeta.majorNumber = meta.majorNumber;
+  rawMeta.versionLabel = meta.versionLabel;
 
-  let images = (meta.images || []).map(({ url, ...rest }) => rest);
+  if (payload.title !== undefined) rawMeta.title = String(payload.title).trim() || rawMeta.title;
+  if (payload.description !== undefined) rawMeta.description = String(payload.description).trim();
+  if (payload.tag !== undefined) rawMeta.tag = String(payload.tag).trim();
+
+  if (payload.coverImage) {
+    const savedCover = saveCoverImage(verDir, payload.coverImage);
+    if (savedCover) rawMeta.cover = savedCover;
+  }
+
+  let images = (rawMeta.images || []).map(({ url, ...rest }) => rest);
   if (Array.isArray(payload.removeImages) && payload.removeImages.length > 0) {
     const rmSet = new Set(payload.removeImages);
     images = images.filter((img) => {
@@ -871,10 +1154,191 @@ function updateVersion(id, payload = {}) {
     });
   }
 
-  meta.images = images;
-  meta.updatedAt = new Date().toISOString();
-  fs.writeFileSync(path.join(verDir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf8');
-  return decorateVersionMeta(meta);
+  rawMeta.images = images;
+  rawMeta.updatedAt = new Date().toISOString();
+  fs.writeFileSync(path.join(verDir, 'meta.json'), JSON.stringify(rawMeta, null, 2), 'utf8');
+  return decorateVersionMeta(rawMeta);
+}
+
+function recordSaveSubVersion(payload = {}) {
+  let rawList = listRawVersionsSorted();
+  if (rawList.length === 0) {
+    listVersions();
+    rawList = listRawVersionsSorted();
+  }
+  const active = readActiveVersionState(rawList);
+  const parentId = active.activeVersionId || rawList[0].id;
+  const parentRaw = rawList.find((v) => v.id === parentId) || rawList[0];
+  const verDir = path.join(VERSIONS_DIR, parentRaw.id);
+  const metaPath = path.join(verDir, 'meta.json');
+  const parentMeta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  parentMeta.majorNumber = parentRaw.majorNumber;
+  parentMeta.versionLabel = parentRaw.versionLabel;
+
+  const checkpoint = getLatestCheckpointForVersion(parentRaw.id);
+  const { files } = readAllSketchFiles();
+  const snapshotFiles = {};
+  for (const name of EDITABLE_FILES) {
+    if (typeof files[name] === 'string') {
+      snapshotFiles[name] = files[name];
+    }
+  }
+
+  const summary = summarizeFileChanges(
+    checkpoint.files,
+    snapshotFiles,
+    checkpoint.compactGrid,
+    payload.simSettings?.compactGrid
+  );
+
+  if (summary.changedFiles.length === 0) {
+    return {
+      created: false,
+      subVersion: null,
+      parentId: parentRaw.id,
+      activeVersionId: active.activeVersionId,
+      activeSubVersionId: active.activeSubVersionId
+    };
+  }
+
+  const existingSubs = Array.isArray(parentMeta.subVersions) ? parentMeta.subVersions : [];
+  const nextSeq = existingSubs.reduce((mx, s) => Math.max(mx, Number(s.seq) || 0), 0) + 1;
+  const versionLabel = `v${parentMeta.majorNumber}.${nextSeq}`;
+  const createdAt = new Date().toISOString();
+  const hash = crypto
+    .createHash('sha1')
+    .update(JSON.stringify(snapshotFiles) + createdAt + Math.random())
+    .digest('hex')
+    .slice(0, 7);
+  const subId = `sub_${String(nextSeq).padStart(3, '0')}_${hash}`;
+  const subDir = path.join(verDir, 'subversions');
+  fs.mkdirSync(subDir, { recursive: true });
+
+  const prevFiles = {};
+  for (const fname of summary.changedFiles) {
+    if (fname === 'Field Map') continue;
+    prevFiles[fname] = checkpoint.files[fname] || '';
+  }
+
+  const source = String(payload.saveSource || 'manual').trim().slice(0, 24);
+  const note = String(payload.saveNote || '').trim().slice(0, 200);
+  const subSnap = {
+    id: subId,
+    parentId: parentRaw.id,
+    seq: nextSeq,
+    versionLabel,
+    hash,
+    source,
+    note,
+    createdAt,
+    files: snapshotFiles,
+    prevFiles,
+    canvasLayout: payload.canvasLayout || null,
+    calibration: payload.calibration || null,
+    simSettings: payload.simSettings || null,
+    blockSummary: payload.blockSummary || '',
+    changedFiles: summary.changedFiles,
+    changeSummary: summary.changeSummary,
+    totalAdded: summary.totalAdded,
+    totalRemoved: summary.totalRemoved
+  };
+
+  fs.writeFileSync(path.join(subDir, `${subId}.json`), JSON.stringify(subSnap, null, 2), 'utf8');
+
+  const subMeta = {
+    id: subId,
+    seq: nextSeq,
+    versionLabel,
+    hash,
+    source,
+    note,
+    createdAt,
+    changedFiles: summary.changedFiles,
+    changeSummary: summary.changeSummary,
+    totalAdded: summary.totalAdded,
+    totalRemoved: summary.totalRemoved,
+    blockSummary: payload.blockSummary || ''
+  };
+
+  existingSubs.push(subMeta);
+  parentMeta.subVersions = existingSubs;
+  parentMeta.subVersionCount = existingSubs.length;
+  fs.writeFileSync(metaPath, JSON.stringify(parentMeta, null, 2), 'utf8');
+  writeActiveVersionState(parentRaw.id, subId);
+
+  return {
+    created: true,
+    subVersion: subMeta,
+    parentId: parentRaw.id,
+    activeVersionId: parentRaw.id,
+    activeSubVersionId: subId
+  };
+}
+
+function getSubVersionDetail(verId, subId) {
+  if (!isSafeVersionId(verId) || !isSafeVersionId(subId)) {
+    throw new Error('Invalid version or sub-version ID');
+  }
+  const { meta } = getVersionDetail(verId);
+  const subPath = path.join(VERSIONS_DIR, verId, 'subversions', `${subId}.json`);
+  if (!fs.existsSync(subPath)) {
+    throw new Error('Sub-version not found');
+  }
+  const snapshot = JSON.parse(fs.readFileSync(subPath, 'utf8'));
+  const subMeta = (meta.subVersions || []).find((s) => s.id === subId) || {
+    id: subId,
+    seq: snapshot.seq,
+    versionLabel: snapshot.versionLabel,
+    hash: snapshot.hash,
+    source: snapshot.source,
+    createdAt: snapshot.createdAt
+  };
+  return { meta, subMeta, snapshot };
+}
+
+function restoreSubVersion(verId, subId) {
+  const { meta, subMeta, snapshot } = getSubVersionDetail(verId, subId);
+  if (snapshot.files && typeof snapshot.files === 'object') {
+    saveSketchUpdates({ files: snapshot.files });
+  }
+  writeActiveVersionState(verId, subId);
+  const current = readAllSketchFiles();
+  return {
+    meta,
+    subMeta,
+    ...current,
+    canvasLayout: snapshot.canvasLayout || null,
+    calibration: snapshot.calibration || null,
+    simSettings: snapshot.simSettings || null,
+    activeVersionId: verId,
+    activeSubVersionId: subId,
+    versions: listVersions()
+  };
+}
+
+function deleteSubVersion(verId, subId) {
+  if (!isSafeVersionId(verId) || !isSafeVersionId(subId)) {
+    throw new Error('Invalid version or sub-version ID');
+  }
+  const verDir = path.join(VERSIONS_DIR, verId);
+  const metaPath = path.join(verDir, 'meta.json');
+  const subPath = path.join(verDir, 'subversions', `${subId}.json`);
+  if (!fs.existsSync(metaPath) || !fs.existsSync(subPath)) {
+    throw new Error('Sub-version not found');
+  }
+  fs.unlinkSync(subPath);
+
+  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  meta.subVersions = (meta.subVersions || []).filter((s) => s.id !== subId);
+  meta.subVersionCount = meta.subVersions.length;
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+
+  const active = readActiveVersionState();
+  if (active.activeVersionId === verId && active.activeSubVersionId === subId) {
+    const newestSub = [...meta.subVersions].sort((a, b) => (Number(b.seq) || 0) - (Number(a.seq) || 0))[0];
+    writeActiveVersionState(verId, newestSub ? newestSub.id : null);
+  }
+  return readActiveVersionState();
 }
 
 function restoreVersion(id) {
@@ -882,13 +1346,17 @@ function restoreVersion(id) {
   if (snapshot.files && typeof snapshot.files === 'object') {
     saveSketchUpdates({ files: snapshot.files });
   }
+  writeActiveVersionState(id, null);
   const current = readAllSketchFiles();
   return {
     meta,
     ...current,
     canvasLayout: snapshot.canvasLayout || null,
     calibration: snapshot.calibration || null,
-    simSettings: snapshot.simSettings || null
+    simSettings: snapshot.simSettings || null,
+    activeVersionId: id,
+    activeSubVersionId: null,
+    versions: listVersions()
   };
 }
 
@@ -897,6 +1365,11 @@ function deleteVersion(id) {
   const verDir = path.join(VERSIONS_DIR, id);
   if (!fs.existsSync(verDir)) throw new Error('Version not found');
   fs.rmSync(verDir, { recursive: true, force: true });
+
+  const remaining = listRawVersionsSorted();
+  const active = readActiveVersionState(remaining);
+  writeActiveVersionState(active.activeVersionId, active.activeSubVersionId);
+  return active;
 }
 
 let compileBusy = false;
@@ -931,13 +1404,47 @@ function createApiMiddleware() {
       }
 
       if (req.method === 'GET' && pathname === '/api/versions') {
-        return sendJson(res, 200, { ok: true, versionsDir: VERSIONS_DIR, versions: listVersions() });
+        const versions = listVersions();
+        const active = readActiveVersionState();
+        return sendJson(res, 200, {
+          ok: true,
+          versionsDir: VERSIONS_DIR,
+          ...active,
+          versions
+        });
       }
 
       if (req.method === 'POST' && pathname === '/api/versions') {
         const body = await readJsonBody(req);
         const version = createVersionSnapshot(body);
-        return sendJson(res, 201, { ok: true, version, versions: listVersions() });
+        const versions = listVersions();
+        const active = readActiveVersionState();
+        return sendJson(res, 201, { ok: true, version, ...active, versions });
+      }
+
+      const verCoverMatch = pathname.match(/^\/api\/versions\/([^/]+)\/cover$/);
+      if (req.method === 'GET' && verCoverMatch) {
+        const id = verCoverMatch[1];
+        if (!isSafeVersionId(id)) return sendJson(res, 400, { ok: false, error: 'Invalid version ID' });
+        const metaPath = path.join(VERSIONS_DIR, id, 'meta.json');
+        if (!fs.existsSync(metaPath)) return sendJson(res, 404, { ok: false, error: 'Version not found' });
+        let coverFile = '';
+        try {
+          const rawMeta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+          coverFile = rawMeta.cover?.filename ? path.basename(rawMeta.cover.filename) : '';
+        } catch (_) {}
+        const fullPath = coverFile ? path.join(VERSIONS_DIR, id, coverFile) : '';
+        if (!fullPath || !fs.existsSync(fullPath) || fs.statSync(fullPath).isDirectory()) {
+          return sendJson(res, 404, { ok: false, error: 'Cover image not found' });
+        }
+        const ext = path.extname(fullPath).toLowerCase();
+        const stat = fs.statSync(fullPath);
+        res.writeHead(200, {
+          'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
+          'Content-Length': stat.size,
+          'Cache-Control': 'no-store'
+        });
+        return fs.createReadStream(fullPath).pipe(res);
       }
 
       const verImgMatch = pathname.match(/^\/api\/versions\/([^/]+)\/image\/([^/]+)$/);
@@ -950,15 +1457,37 @@ function createApiMiddleware() {
           return sendJson(res, 404, { ok: false, error: 'Image not found' });
         }
         const ext = path.extname(fullPath).toLowerCase();
+        const stat = fs.statSync(fullPath);
         res.writeHead(200, {
           'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
+          'Content-Length': stat.size,
           'Cache-Control': 'no-store'
         });
         return fs.createReadStream(fullPath).pipe(res);
       }
 
+      const subRestoreMatch = pathname.match(/^\/api\/versions\/([^/]+)\/subversions\/([^/]+)\/restore$/);
+      if (req.method === 'POST' && subRestoreMatch) {
+        await readJsonBody(req);
+        const restored = restoreSubVersion(subRestoreMatch[1], subRestoreMatch[2]);
+        return sendJson(res, 200, { ok: true, ...restored });
+      }
+
+      const subItemMatch = pathname.match(/^\/api\/versions\/([^/]+)\/subversions\/([^/]+)$/);
+      if (subItemMatch) {
+        const [, verId, subId] = subItemMatch;
+        if (req.method === 'GET') {
+          return sendJson(res, 200, { ok: true, ...getSubVersionDetail(verId, subId) });
+        }
+        if (req.method === 'DELETE') {
+          const active = deleteSubVersion(verId, subId);
+          return sendJson(res, 200, { ok: true, ...active, versions: listVersions() });
+        }
+      }
+
       const verRestoreMatch = pathname.match(/^\/api\/versions\/([^/]+)\/restore$/);
       if (req.method === 'POST' && verRestoreMatch) {
+        await readJsonBody(req);
         const restored = restoreVersion(verRestoreMatch[1]);
         return sendJson(res, 200, { ok: true, ...restored });
       }
@@ -972,11 +1501,12 @@ function createApiMiddleware() {
         if (req.method === 'PUT') {
           const body = await readJsonBody(req);
           const version = updateVersion(verId, body);
-          return sendJson(res, 200, { ok: true, version, versions: listVersions() });
+          const active = readActiveVersionState();
+          return sendJson(res, 200, { ok: true, version, ...active, versions: listVersions() });
         }
         if (req.method === 'DELETE') {
-          deleteVersion(verId);
-          return sendJson(res, 200, { ok: true, versions: listVersions() });
+          const active = deleteVersion(verId);
+          return sendJson(res, 200, { ok: true, ...active, versions: listVersions() });
         }
       }
 
@@ -989,7 +1519,22 @@ function createApiMiddleware() {
         const body = await readJsonBody(req);
         saveSketchUpdates(body);
         const data = readAllSketchFiles();
-        return sendJson(res, 200, { ok: true, ...data });
+        let saveLog = null;
+        if (body && body.recordSaveLog) {
+          saveLog = recordSaveSubVersion(body);
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          ...data,
+          ...(saveLog
+            ? {
+                subVersion: saveLog.subVersion,
+                activeVersionId: saveLog.activeVersionId,
+                activeSubVersionId: saveLog.activeSubVersionId,
+                versions: saveLog.created ? listVersions() : undefined
+              }
+            : {})
+        });
       }
 
       if (req.method === 'POST' && pathname === '/api/compile') {
@@ -1060,6 +1605,7 @@ function createApiMiddleware() {
       }
 
       if (req.method === 'POST' && pathname === '/api/release-port') {
+        await readJsonBody(req).catch(() => ({}));
         const result = await releaseSerialPortLocks();
         return sendJson(res, 200, { ok: true, ...result });
       }

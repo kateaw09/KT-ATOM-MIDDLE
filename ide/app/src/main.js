@@ -26,6 +26,7 @@ import {
 } from './blocks/definitions.js';
 import { createCodeIdeController } from './editor/codeIde.js';
 import { buildSimSegments, evalSegmentPose, drawSimulator } from './sim/simulator.js';
+import { render2DFieldGrid, renderIsometricGrid } from './sim/fieldRenderer.js';
 import { createMapManagerController } from './sim/mapManager.js';
 import {
   loadRescueMiddlePreset,
@@ -177,10 +178,12 @@ const state = {
   autoSaveTimer: null,
   versions: [],
   versionsDir: '',
-  verStagingImages: [],
+  activeVersionId: null,
+  activeSubVersionId: null,
   editingVersionId: null,
-  verKeepImages: [],
-  verRemoveImages: [],
+  verCoverMode: '2d',
+  verPendingCover: null,
+  verExpandedSubs: {},
   compiling: false,
   uploading: false,
   artifacts: [],
@@ -250,13 +253,43 @@ function appendSerial(text) {
 }
 
 async function apiJson(url, options = {}) {
-  const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  return data;
+  const method = String(options.method || 'GET').toUpperCase();
+  const hasBody = options.body !== undefined && options.body !== null;
+  const headers = {
+    ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+    ...(options.headers || {})
+  };
+  const reqInit = { ...options, method, headers };
+
+  const maxAttempts = method === 'GET' ? 2 : 1;
+  let lastErr = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url, reqInit);
+      const text = await res.text();
+      let data = {};
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch (_) {
+          data = { error: text };
+        }
+      }
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    } catch (err) {
+      lastErr = err;
+      if (err instanceof TypeError && attempt + 1 < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 180));
+        continue;
+      }
+      if (err instanceof TypeError || /Failed to fetch/i.test(String(err?.message || ''))) {
+        throw new Error('เชื่อมต่อเซิร์ฟเวอร์ IDE ไม่ได้ (Failed to fetch) — กรุณาตรวจสอบว่าเซิร์ฟเวอร์ IDE ยังทำงานอยู่');
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 // ============================================================================
@@ -3197,22 +3230,65 @@ function stepSimulatorFrame(ts) {
 // ============================================================================
 // Save, Compile, Offline WebSerial Upload, Host COM Flash & Calibration Reader
 // ============================================================================
-async function saveFiles(silent = false, viaAutoSave = false) {
+function buildCurrentCanvasLayout() {
+  return {
+    activeMissionFile: state.activeMissionFile,
+    zoomPct: state.zoomPct,
+    missions: Object.fromEntries(MISSION_DEFS.map((d) => {
+      const m = ensureMissionStructure(state.missions[d.file]);
+      return [d.file, {
+        placed: !!m.placed,
+        x: Math.round(m.x),
+        y: Math.round(m.y),
+        folded: !!m.folded,
+        activeSection: m.activeSection || 'Box1',
+        foldedSections: m.foldedSections || {}
+      }];
+    })),
+    looseBlocks: state.looseBlocks
+  };
+}
+
+function buildBlockSummary() {
+  return MISSION_DEFS.map((d) => `M${d.file.match(/\d/)?.[0]}:${getMissionTotalCount(state.missions[d.file])}`).join(' · ');
+}
+
+async function saveFiles(silent = false, viaAutoSave = false, saveSource = null) {
+  const shouldLog = !viaAutoSave;
+  const payload = { files: state.files };
+  if (shouldLog) {
+    payload.recordSaveLog = true;
+    payload.saveSource = saveSource || 'manual';
+    payload.canvasLayout = buildCurrentCanvasLayout();
+    payload.calibration = state.calibration;
+    payload.simSettings = getCurrentSimSettings();
+    payload.blockSummary = buildBlockSummary();
+  }
   const data = await apiJson('/api/files', {
     method: 'POST',
-    body: JSON.stringify({ files: state.files })
+    body: JSON.stringify(payload)
   });
   state.files = data.files;
   state.savedFiles = { ...data.files };
   state.config = data.config || {};
   syncCalibrationFromConfig();
   updateDirtyIndicator();
+  if (data.versions) {
+    syncVersionListResponse(data);
+  }
   if ($('autoSaveStatusText')) {
     const t = new Date().toLocaleTimeString('th-TH', { hour12: false });
     $('autoSaveStatusText').textContent = viaAutoSave ? `Auto-saved ${t}` : `Saved ${t}`;
     $('autoSaveStatusText').classList.remove('dirty', 'off');
   }
-  if (!silent) appendConsole('[OK] บันทึกไฟล์ลงโปรเจกต์เรียบร้อยแล้ว');
+  if (!silent) {
+    if (data.subVersion) {
+      const filesList = (data.subVersion.changedFiles || []).join(', ');
+      appendConsole(`[OK] บันทึกไฟล์แล้ว · เก็บ Log เวอร์ชันย่อย ${data.subVersion.versionLabel} (${filesList})`);
+    } else {
+      appendConsole('[OK] บันทึกไฟล์ลงโปรเจกต์เรียบร้อยแล้ว (ไม่มีการเปลี่ยนแปลงใหม่จากเวอร์ชันล่าสุด)');
+    }
+  }
 }
 
 function updateMeters(flash, ram) {
@@ -3253,7 +3329,7 @@ async function compileProject() {
   appendConsole('=== เริ่มคอมไพล์เฟิร์มแวร์ด้วย Arduino CLI (PTBOT_ESP32:esp32:atom_vx) ===', true);
 
   try {
-    await saveFiles(true);
+    await saveFiles(true, false, 'compile');
     const res = await apiJson('/api/compile', { method: 'POST', body: JSON.stringify({}) });
     appendConsole(res.log || '(no compiler output)');
     updateMeters(res.flash, res.ram);
@@ -3918,16 +3994,30 @@ async function saveConfigModal() {
     else patch[field.key] = field.type === 'bool' ? el.value === 'true' : parseFloat(el.value);
   }
   try {
-    const data = await apiJson('/api/files', { method: 'POST', body: JSON.stringify({ configPatch: patch }) });
+    const data = await apiJson('/api/files', {
+      method: 'POST',
+      body: JSON.stringify({
+        configPatch: patch,
+        recordSaveLog: true,
+        saveSource: 'config',
+        saveNote: 'อัปเดตค่า Robot Config',
+        canvasLayout: buildCurrentCanvasLayout(),
+        calibration: state.calibration,
+        simSettings: getCurrentSimSettings(),
+        blockSummary: buildBlockSummary()
+      })
+    });
     state.files['Config.ino'] = data.files['Config.ino'];
     state.savedFiles['Config.ino'] = data.files['Config.ino'];
     state.config = data.config || {};
     syncCalibrationFromConfig(true);
     if (state.activeCodeFile === 'Config.ino') codeIde.loadFileIntoEditor('Config.ino', state.files['Config.ino']);
     updateDirtyIndicator();
+    if (data.versions) syncVersionListResponse(data);
     rebuildSimAndDraw(false);
     $('configModal').hidden = true;
-    appendConsole('[OK] บันทึกค่า Robot Config ลงใน Config.ino เรียบร้อย');
+    const subNote = data.subVersion ? ` · เก็บ Log ${data.subVersion.versionLabel}` : '';
+    appendConsole(`[OK] บันทึกค่า Robot Config ลงใน Config.ino เรียบร้อย${subNote}`);
   } catch (err) {
     appendConsole(`[ERR] บันทึก Config ไม่สำเร็จ: ${err.message}`);
   }
@@ -4127,34 +4217,120 @@ function applySimSettings(s) {
   mapManager.refreshFromExternal();
 }
 
+function updateActiveVersionBadge() {
+  const el = $('verActiveBadge');
+  if (!el) return;
+  const ver = state.versions.find((v) => v.id === state.activeVersionId) || state.versions[0];
+  if (!ver) {
+    el.textContent = '-';
+    return;
+  }
+  const sub = state.activeSubVersionId
+    ? (ver.subVersions || []).find((s) => s.id === state.activeSubVersionId)
+    : null;
+  el.textContent = sub ? `ใช้งาน: ${sub.versionLabel}` : `ใช้งาน: ${ver.versionLabel || `v${ver.majorNumber || 1}`}`;
+}
+
+function syncVersionListResponse(res) {
+  if (Array.isArray(res.versions)) state.versions = res.versions;
+  if (res.versionsDir) state.versionsDir = res.versionsDir;
+  if (res.activeVersionId !== undefined) state.activeVersionId = res.activeVersionId;
+  if (res.activeSubVersionId !== undefined) state.activeSubVersionId = res.activeSubVersionId;
+  if ($('versionCountBadge')) $('versionCountBadge').textContent = String(state.versions.length);
+  if ($('verStoragePathBadge') && state.versionsDir) {
+    $('verStoragePathBadge').title = state.versionsDir;
+    $('verStoragePathBadge').textContent = '.kt-versions (Local Disk)';
+  }
+  updateActiveVersionBadge();
+  if (!$('versionModal')?.hidden) renderVersionTimeline();
+}
+
 async function loadVersions() {
   try {
     const res = await apiJson('/api/versions');
-    state.versions = res.versions || [];
-    state.versionsDir = res.versionsDir || '';
-    if ($('versionCountBadge')) $('versionCountBadge').textContent = String(state.versions.length);
-    if ($('verStoragePathBadge') && state.versionsDir) {
-      $('verStoragePathBadge').title = state.versionsDir;
-      $('verStoragePathBadge').textContent = '.kt-versions (Local Disk)';
-    }
+    syncVersionListResponse(res);
     renderVersionTimeline();
   } catch (err) {
     appendConsole(`[WARN] โหลดประวัติเวอร์ชันไม่สำเร็จ: ${err.message}`);
   }
 }
 
+function captureFieldCoverDataUrl(mode = state.verCoverMode) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 640;
+  canvas.height = 400;
+  const gridData = Array.isArray(state.fieldMap?.gridData) && state.fieldMap.gridData.length > 0
+    ? state.fieldMap.gridData
+    : loadRescueMiddlePreset(state.fieldMap?.rows || 7, state.fieldMap?.cols || 7);
+  const segs = state.sim.segments || [];
+  const lastPose = segs.length > 0 ? evalSegmentPose(segs[segs.length - 1], 1) : null;
+  const simOverlay = {
+    tileWidthCm: state.fieldMap.tileWidthCm || 30,
+    segments: segs,
+    segIdx: Math.max(0, segs.length - 1),
+    segProgress: 1,
+    robotX: lastPose ? lastPose.x : state.sim.robotX,
+    robotY: lastPose ? lastPose.y : state.sim.robotY,
+    robotH: lastPose ? lastPose.h : state.sim.robotH
+  };
+
+  if (mode === 'iso') {
+    renderIsometricGrid(canvas, gridData, {
+      cameraRotDeg: state.fieldMap.simCameraRot || 0,
+      tileWidthCm: state.fieldMap.tileWidthCm || 30,
+      simOverlay,
+      bgColor: '#070b14'
+    });
+  } else {
+    render2DFieldGrid(canvas, gridData, {
+      showMarkers: false,
+      padding: 16,
+      simOverlay,
+      bgColor: '#070b14'
+    });
+  }
+
+  return {
+    name: `field_cover_${mode}.png`,
+    dataUrl: canvas.toDataURL('image/png')
+  };
+}
+
+function refreshVersionCoverPreview(forceCapture = true, existingCoverUrl = null) {
+  const modeBtn = $('btnVerCoverMode');
+  if (modeBtn) {
+    const lbl = modeBtn.querySelector('span');
+    if (lbl) lbl.textContent = state.verCoverMode === 'iso' ? '3D Iso' : '2D';
+  }
+  if (forceCapture) {
+    state.verPendingCover = captureFieldCoverDataUrl(state.verCoverMode);
+  }
+  const imgEl = $('verCoverPreviewImg');
+  if (imgEl) {
+    imgEl.src = state.verPendingCover?.dataUrl || existingCoverUrl || '';
+  }
+  const metaEl = $('verCoverMetaText');
+  if (metaEl) {
+    const rows = state.fieldMap?.rows || 7;
+    const cols = state.fieldMap?.cols || 7;
+    if (!state.verPendingCover && existingCoverUrl) {
+      metaEl.textContent = 'ภาพปกเดิม (กดอัปเดตปกเพื่อดึงสนามใหม่)';
+    } else {
+      metaEl.textContent = `สนาม ${cols}×${rows} · ${state.verCoverMode === 'iso' ? '3D Isometric' : '2D Top-Down'}`;
+    }
+  }
+}
+
 function resetVersionForm() {
   state.editingVersionId = null;
-  state.verStagingImages = [];
-  state.verKeepImages = [];
-  state.verRemoveImages = [];
+  state.verCoverMode = state.fieldMap?.simViewMode === 'iso' ? 'iso' : '2d';
   if ($('verFormModeTitle')) $('verFormModeTitle').textContent = 'บันทึกเวอร์ชันใหม่ (Create Commit)';
   if ($('verCommitBtnLabel')) $('verCommitBtnLabel').textContent = 'Commit & Save Version';
   if ($('btnCancelVerEdit')) $('btnCancelVerEdit').hidden = true;
   if ($('verTitleInput')) $('verTitleInput').value = '';
   if ($('verTagInput')) $('verTagInput').value = '';
   if ($('verDescInput')) $('verDescInput').value = '';
-  renderStagingImages();
+  refreshVersionCoverPreview(true);
 }
 
 function openVersionModal() {
@@ -4171,90 +4347,6 @@ function openVersionModal() {
   $('verTitleInput')?.focus();
 }
 
-function renderStagingImages() {
-  const grid = $('verStagingImages');
-  if (!grid) return;
-  grid.innerHTML = '';
-
-  state.verKeepImages.forEach((img) => {
-    const card = document.createElement('div');
-    card.className = 'ver-stage-thumb';
-    card.innerHTML = `<img src="${escapeHtml(img.url)}" alt="${escapeHtml(img.originalName || img.filename)}" />`;
-    const rm = document.createElement('button');
-    rm.type = 'button';
-    rm.className = 'ver-stage-rm';
-    rm.innerHTML = svgIcon('close', 'sm');
-    rm.onclick = () => {
-      state.verRemoveImages.push(img.filename);
-      state.verKeepImages = state.verKeepImages.filter((item) => item.filename !== img.filename);
-      renderStagingImages();
-    };
-    card.appendChild(rm);
-    grid.appendChild(card);
-  });
-
-  state.verStagingImages.forEach((img, idx) => {
-    const card = document.createElement('div');
-    card.className = 'ver-stage-thumb';
-    card.innerHTML = `<img src="${img.dataUrl}" alt="${escapeHtml(img.name)}" />`;
-    const rm = document.createElement('button');
-    rm.type = 'button';
-    rm.className = 'ver-stage-rm';
-    rm.innerHTML = svgIcon('close', 'sm');
-    rm.onclick = () => { state.verStagingImages.splice(idx, 1); renderStagingImages(); };
-    card.appendChild(rm);
-    grid.appendChild(card);
-  });
-}
-
-function readImageFileCompressed(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error('อ่านไฟล์รูปไม่สำเร็จ'));
-    reader.onload = () => {
-      const rawUrl = reader.result;
-      const img = new Image();
-      img.onload = () => {
-        const maxDim = 1400;
-        const { width, height } = img;
-        if (width <= maxDim && height <= maxDim && file.size <= 800 * 1024) {
-          return resolve({ name: file.name || 'image.png', dataUrl: rawUrl });
-        }
-        const scale = Math.min(1, maxDim / Math.max(width, height));
-        const cw = Math.max(1, Math.round(width * scale));
-        const ch = Math.max(1, Math.round(height * scale));
-        const canvas = document.createElement('canvas');
-        canvas.width = cw;
-        canvas.height = ch;
-        canvas.getContext('2d').drawImage(img, 0, 0, cw, ch);
-        resolve({ name: file.name || 'image.jpg', dataUrl: canvas.toDataURL('image/jpeg', 0.86) });
-      };
-      img.onerror = () => resolve({ name: file.name || 'image.png', dataUrl: rawUrl });
-      img.src = rawUrl;
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-async function addImageFilesToStaging(fileList) {
-  for (const f of Array.from(fileList || [])) {
-    if (!f.type.startsWith('image/')) continue;
-    try { state.verStagingImages.push(await readImageFileCompressed(f)); } catch (_) {}
-  }
-  renderStagingImages();
-}
-
-function captureSimulatorImage() {
-  const sim = $('simCanvas');
-  if (!sim) return;
-  const stamp = new Date().toISOString().slice(11, 19).replace(/:/g, '');
-  state.verStagingImages.push({
-    name: `sim_${state.activeMissionFile.replace('.ino', '')}_${stamp}.png`,
-    dataUrl: sim.toDataURL('image/png')
-  });
-  renderStagingImages();
-}
-
 async function commitOrUpdateVersion() {
   const title = $('verTitleInput')?.value.trim() || '';
   const tag = $('verTagInput')?.value.trim() || '';
@@ -4264,58 +4356,42 @@ async function commitOrUpdateVersion() {
 
   try {
     if (state.editingVersionId) {
+      const patchBody = {
+        title: title || 'Updated Snapshot',
+        tag,
+        description
+      };
+      if (state.verPendingCover) {
+        patchBody.coverImage = state.verPendingCover;
+      }
       const res = await apiJson(`/api/versions/${encodeURIComponent(state.editingVersionId)}`, {
         method: 'PUT',
-        body: JSON.stringify({
-          title: title || 'Updated Snapshot',
-          tag,
-          description,
-          addImages: state.verStagingImages,
-          removeImages: state.verRemoveImages
-        })
+        body: JSON.stringify(patchBody)
       });
-      state.versions = res.versions || state.versions;
-      appendConsole(`[OK] อัปเดตข้อมูลเวอร์ชัน #${res.version?.hash || ''} เรียบร้อย`);
+      syncVersionListResponse(res);
+      appendConsole(`[OK] อัปเดตข้อมูลเวอร์ชัน ${res.version?.versionLabel || ''} #${res.version?.hash || ''} เรียบร้อย`);
     } else {
-      const canvasLayout = {
-        activeMissionFile: state.activeMissionFile,
-        zoomPct: state.zoomPct,
-        missions: Object.fromEntries(MISSION_DEFS.map((d) => {
-          const m = ensureMissionStructure(state.missions[d.file]);
-          return [d.file, {
-            placed: !!m.placed,
-            x: Math.round(m.x),
-            y: Math.round(m.y),
-            folded: !!m.folded,
-            activeSection: m.activeSection || 'Box1',
-            foldedSections: m.foldedSections || {}
-          }];
-        })),
-        looseBlocks: state.looseBlocks
-      };
-      const blockSummary = MISSION_DEFS.map((d) => `M${d.file.match(/\d/)?.[0]}:${getMissionTotalCount(state.missions[d.file])}`).join(' · ');
-
+      const coverImage = state.verPendingCover || captureFieldCoverDataUrl(state.verCoverMode);
       const res = await apiJson('/api/versions', {
         method: 'POST',
         body: JSON.stringify({
           title: title || `Save ${new Date().toLocaleString('th-TH', { hour12: false })}`,
           tag,
           description,
-          blockSummary,
+          blockSummary: buildBlockSummary(),
           files: state.files,
-          canvasLayout,
+          canvasLayout: buildCurrentCanvasLayout(),
           calibration: state.calibration,
           simSettings: getCurrentSimSettings(),
-          images: state.verStagingImages
+          coverImage
         })
       });
-      state.versions = res.versions || state.versions;
+      syncVersionListResponse(res);
       state.savedFiles = { ...state.files };
       updateDirtyIndicator();
-      appendConsole(`[OK] บันทึกเวอร์ชันใหม่ #${res.version?.hash || ''} (${res.version?.title}) เรียบร้อย`);
+      appendConsole(`[OK] บันทึกเวอร์ชันหลัก ${res.version?.versionLabel || ''} #${res.version?.hash || ''} (${res.version?.title}) เรียบร้อย`);
     }
 
-    if ($('versionCountBadge')) $('versionCountBadge').textContent = String(state.versions.length);
     resetVersionForm();
     renderVersionTimeline();
   } catch (err) {
@@ -4325,119 +4401,224 @@ async function commitOrUpdateVersion() {
   }
 }
 
-function computeSnapshotDiffLines(snapFiles) {
-  const rows = [];
-  const allNames = Array.from(new Set([...Object.keys(state.files), ...Object.keys(snapFiles || {})]));
-  for (const fname of allNames) {
-    const oldText = String(snapFiles[fname] || '');
-    const curText = String(state.files[fname] || '');
-    if (oldText === curText) continue;
-    rows.push(`<div class="diff-line-hdr">--- ${escapeHtml(fname)} (snapshot vs current) ---</div>`);
-    const aLines = oldText.split('\n');
-    const bLines = curText.split('\n');
-    const aSet = new Set(aLines);
-    const bSet = new Set(bLines);
-    aLines.forEach((l) => { if (!bSet.has(l)) rows.push(`<div class="diff-line-del">- ${escapeHtml(l)}</div>`); });
-    bLines.forEach((l) => { if (!aSet.has(l)) rows.push(`<div class="diff-line-add">+ ${escapeHtml(l)}</div>`); });
+function computeFileDiffOps(oldText, newText) {
+  const split = (t) => (t ? String(t).replace(/\r\n/g, '\n').split('\n') : []);
+  const a = split(oldText);
+  const b = split(newText);
+  let p = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let s = 0;
+  while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  const am = a.slice(p, a.length - s);
+  const bm = b.slice(p, b.length - s);
+  const m = am.length;
+  const n = bm.length;
+  if (m === 0 && n === 0) return [];
+
+  const ops = [];
+  if (m * n <= 160000) {
+    const cols = n + 1;
+    const dp = new Int32Array((m + 1) * cols);
+    for (let i = m - 1; i >= 0; i--) {
+      const ro = i * cols;
+      const nro = (i + 1) * cols;
+      for (let j = n - 1; j >= 0; j--) {
+        dp[ro + j] = am[i] === bm[j]
+          ? dp[nro + j + 1] + 1
+          : Math.max(dp[nro + j], dp[ro + j + 1]);
+      }
+    }
+    let i = 0;
+    let j = 0;
+    while (i < m && j < n) {
+      if (am[i] === bm[j]) {
+        ops.push({ type: 'ctx', text: am[i] });
+        i++;
+        j++;
+      } else if (dp[(i + 1) * cols + j] >= dp[i * cols + j + 1]) {
+        ops.push({ type: 'del', text: am[i] });
+        i++;
+      } else {
+        ops.push({ type: 'add', text: bm[j] });
+        j++;
+      }
+    }
+    while (i < m) ops.push({ type: 'del', text: am[i++] });
+    while (j < n) ops.push({ type: 'add', text: bm[j++] });
+  } else {
+    for (const l of am) ops.push({ type: 'del', text: l });
+    for (const l of bm) ops.push({ type: 'add', text: l });
   }
-  return rows.length ? rows.slice(0, 120).join('') : '<div class="muted">ไฟล์ทั้งหมดในเวอร์ชันนี้ตรงกับโค้ดปัจจุบัน 100%</div>';
+  return ops;
+}
+
+function computeSnapshotDiffLines(snapFiles, targetFiles = state.files, emptyMsg = 'ไฟล์ทั้งหมดในเวอร์ชันนี้ตรงกับโค้ดปัจจุบัน 100%') {
+  const rows = [];
+  const allNames = Array.from(new Set([...Object.keys(targetFiles || {}), ...Object.keys(snapFiles || {})]));
+  for (const fname of allNames) {
+    const oldText = String(snapFiles?.[fname] || '');
+    const curText = String(targetFiles?.[fname] || '');
+    if (oldText === curText) continue;
+    rows.push(`<div class="diff-line-hdr">--- ${escapeHtml(fname)} ---</div>`);
+    const ops = computeFileDiffOps(oldText, curText);
+    for (const op of ops) {
+      if (op.type === 'del') rows.push(`<div class="diff-line-del">- ${escapeHtml(op.text)}</div>`);
+      else if (op.type === 'add') rows.push(`<div class="diff-line-add">+ ${escapeHtml(op.text)}</div>`);
+    }
+  }
+  return rows.length ? rows.slice(0, 140).join('') : `<div class="muted">${escapeHtml(emptyMsg)}</div>`;
+}
+
+function applyRestoredSnapshot(res, label) {
+  state.files = res.files || {};
+  state.savedFiles = { ...state.files };
+  state.config = res.config || {};
+  if (res.canvasLayout) {
+    if (res.canvasLayout.activeMissionFile && state.missions[res.canvasLayout.activeMissionFile]) {
+      state.activeMissionFile = res.canvasLayout.activeMissionFile;
+    }
+    if (res.canvasLayout.missions) {
+      for (const d of MISSION_DEFS) {
+        const sm = res.canvasLayout.missions[d.file];
+        const m = ensureMissionStructure(state.missions[d.file]);
+        if (sm && m) {
+          m.placed = !!sm.placed;
+          m.x = Number.isFinite(sm.x) ? sm.x : d.defaultX;
+          m.y = Number.isFinite(sm.y) ? sm.y : d.defaultY;
+          m.folded = !!sm.folded;
+          if (sm.activeSection && MISSION_SECTIONS.some((s) => s.id === sm.activeSection)) {
+            m.activeSection = sm.activeSection;
+          }
+          if (sm.foldedSections && typeof sm.foldedSections === 'object') {
+            m.foldedSections = { ...sm.foldedSections };
+          }
+        }
+      }
+    }
+    if (Array.isArray(res.canvasLayout.looseBlocks)) state.looseBlocks = normalizeLooseStacks(res.canvasLayout.looseBlocks);
+    saveCanvasLayout();
+  }
+  if (res.simSettings) applySimSettings(res.simSettings);
+  if (res.calibration?.tpcm) {
+    state.calibration = { ...state.calibration, ...res.calibration };
+    renderCalibrationCard();
+  } else {
+    syncCalibrationFromConfig(true);
+  }
+
+  syncVersionListResponse(res);
+  parseAllMissionsFromFiles();
+  codeIde.resetAllHistory();
+  codeIde.loadFileIntoEditor(state.activeCodeFile, state.files[state.activeCodeFile] || '');
+  renderVisualCodePreview(state.files[state.activeMissionFile] || '', state.activeMissionFile);
+  updateDirtyIndicator();
+  renderPalette();
+  renderCanvas();
+  rebuildSimAndDraw(true);
+  pushBlockSnapshot(true);
+  $('versionModal').hidden = true;
+  appendConsole(`[OK] กู้คืนเวอร์ชัน ${label} กลับมาใช้งานเรียบร้อยแล้ว`);
 }
 
 async function restoreVersionById(id, title) {
   if (!confirm(`ต้องการดึงเวอร์ชัน "${title}" กลับมาทับไฟล์ในเครื่องตอนนี้หรือไม่?`)) return;
+  clearTimeout(state.autoSaveTimer);
   try {
-    const res = await apiJson(`/api/versions/${encodeURIComponent(id)}/restore`, { method: 'POST', body: JSON.stringify({}) });
-    state.files = res.files || {};
-    state.savedFiles = { ...state.files };
-    state.config = res.config || {};
-    if (res.canvasLayout) {
-      if (res.canvasLayout.activeMissionFile && state.missions[res.canvasLayout.activeMissionFile]) {
-        state.activeMissionFile = res.canvasLayout.activeMissionFile;
-      }
-      if (res.canvasLayout.missions) {
-        for (const d of MISSION_DEFS) {
-          const sm = res.canvasLayout.missions[d.file];
-          const m = ensureMissionStructure(state.missions[d.file]);
-          if (sm && m) {
-            m.placed = !!sm.placed;
-            m.x = Number.isFinite(sm.x) ? sm.x : d.defaultX;
-            m.y = Number.isFinite(sm.y) ? sm.y : d.defaultY;
-            m.folded = !!sm.folded;
-            if (sm.activeSection && MISSION_SECTIONS.some((s) => s.id === sm.activeSection)) {
-              m.activeSection = sm.activeSection;
-            }
-            if (sm.foldedSections && typeof sm.foldedSections === 'object') {
-              m.foldedSections = { ...sm.foldedSections };
-            }
-          }
-        }
-      }
-      if (Array.isArray(res.canvasLayout.looseBlocks)) state.looseBlocks = normalizeLooseStacks(res.canvasLayout.looseBlocks);
-      saveCanvasLayout();
-    }
-    if (res.simSettings) applySimSettings(res.simSettings);
-    if (res.calibration?.tpcm) {
-      state.calibration = { ...state.calibration, ...res.calibration };
-      renderCalibrationCard();
-    } else {
-      syncCalibrationFromConfig(true);
-    }
-
-    parseAllMissionsFromFiles();
-    codeIde.resetAllHistory();
-    codeIde.loadFileIntoEditor(state.activeCodeFile, state.files[state.activeCodeFile] || '');
-    renderVisualCodePreview(state.files[state.activeMissionFile] || '', state.activeMissionFile);
-    updateDirtyIndicator();
-    renderPalette();
-    renderCanvas();
-    rebuildSimAndDraw(true);
-    pushBlockSnapshot(true);
-    $('versionModal').hidden = true;
-    appendConsole(`[OK] กู้คืนเวอร์ชัน #${res.meta?.hash || ''} (${title}) กลับมาใช้งานเรียบร้อยแล้ว`);
+    const res = await apiJson(`/api/versions/${encodeURIComponent(id)}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({})
+    });
+    const label = `${res.meta?.versionLabel || ''} #${res.meta?.hash || ''} (${title})`.trim();
+    applyRestoredSnapshot(res, label);
   } catch (err) {
     appendConsole(`[ERR] กู้คืนเวอร์ชันไม่สำเร็จ: ${err.message}`);
   }
 }
 
+async function restoreSubVersionById(verId, subId, label) {
+  if (!confirm(`ต้องการดึงเวอร์ชันย่อย "${label}" กลับมาทับไฟล์ในเครื่องตอนนี้หรือไม่?`)) return;
+  clearTimeout(state.autoSaveTimer);
+  try {
+    const res = await apiJson(
+      `/api/versions/${encodeURIComponent(verId)}/subversions/${encodeURIComponent(subId)}/restore`,
+      { method: 'POST', body: JSON.stringify({}) }
+    );
+    applyRestoredSnapshot(res, `${label} #${res.subMeta?.hash || ''}`.trim());
+  } catch (err) {
+    appendConsole(`[ERR] กู้คืนเวอร์ชันย่อยไม่สำเร็จ: ${err.message}`);
+  }
+}
+
 async function deleteVersionById(id, title) {
-  if (!confirm(`ลบเวอร์ชัน "${title}" ออกจากเครื่องถาวรหรือไม่?`)) return;
+  if (!confirm(`ลบเวอร์ชัน "${title}" และประวัติย่อยทั้งหมดออกจากเครื่องถาวรหรือไม่?`)) return;
   try {
     const res = await apiJson(`/api/versions/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    state.versions = res.versions || [];
-    if ($('versionCountBadge')) $('versionCountBadge').textContent = String(state.versions.length);
     if (state.editingVersionId === id) resetVersionForm();
+    syncVersionListResponse(res);
     renderVersionTimeline();
   } catch (err) {
     appendConsole(`[ERR] ลบเวอร์ชันไม่สำเร็จ: ${err.message}`);
   }
 }
 
+async function deleteSubVersionById(verId, subId, label) {
+  if (!confirm(`ลบ Log เวอร์ชันย่อย "${label}" ออกจากเครื่องถาวรหรือไม่?`)) return;
+  try {
+    const res = await apiJson(
+      `/api/versions/${encodeURIComponent(verId)}/subversions/${encodeURIComponent(subId)}`,
+      { method: 'DELETE' }
+    );
+    syncVersionListResponse(res);
+    renderVersionTimeline();
+  } catch (err) {
+    appendConsole(`[ERR] ลบเวอร์ชันย่อยไม่สำเร็จ: ${err.message}`);
+  }
+}
+
 function startEditingVersion(v) {
   state.editingVersionId = v.id;
-  state.verStagingImages = [];
-  state.verRemoveImages = [];
-  state.verKeepImages = [...(v.images || [])];
-  if ($('verFormModeTitle')) $('verFormModeTitle').textContent = `แก้ไขเวอร์ชัน #${v.hash}`;
+  state.verPendingCover = null;
+  if ($('verFormModeTitle')) $('verFormModeTitle').textContent = `แก้ไขเวอร์ชัน ${v.versionLabel || ''} #${v.hash}`;
   if ($('verCommitBtnLabel')) $('verCommitBtnLabel').textContent = 'Update Version Info';
   if ($('btnCancelVerEdit')) $('btnCancelVerEdit').hidden = false;
   if ($('verTitleInput')) $('verTitleInput').value = v.title || '';
   if ($('verTagInput')) $('verTagInput').value = v.tag || '';
   if ($('verDescInput')) $('verDescInput').value = v.description || '';
-  renderStagingImages();
+  refreshVersionCoverPreview(false, v.coverUrl);
   $('verTitleInput')?.focus();
 }
 
 function openLightbox(url, caption) {
+  if (!url) return;
   if ($('lightboxImg')) $('lightboxImg').src = url;
   if ($('lightboxCaption')) $('lightboxCaption').textContent = caption || 'Image Preview';
   if ($('imageLightboxModal')) $('imageLightboxModal').hidden = false;
+}
+
+function formatSaveSourceLabel(src) {
+  if (src === 'manual') return 'Save';
+  if (src === 'config') return 'Config';
+  if (src === 'compile') return 'Compile';
+  if (src === 'auto') return 'Auto';
+  return src || 'Save';
+}
+
+function matchesVersionSearch(v, q) {
+  if (!q) return true;
+  const mainHay = `${v.versionLabel || ''} ${v.hash} ${v.title} ${v.tag || ''} ${v.description || ''} ${(v.changedFiles || []).join(' ')}`.toLowerCase();
+  if (mainHay.includes(q)) return true;
+  return (v.subVersions || []).some((sub) => {
+    const previewTxt = (sub.changeSummary || []).flatMap((cs) => cs.preview || []).join(' ');
+    const subHay = `${sub.versionLabel || ''} ${sub.hash} ${sub.source || ''} ${sub.note || ''} ${(sub.changedFiles || []).join(' ')} ${previewTxt}`.toLowerCase();
+    return subHay.includes(q);
+  });
 }
 
 function renderVersionTimeline() {
   const container = $('versionTimelineList');
   if (!container) return;
   const q = ($('verSearchInput')?.value || '').trim().toLowerCase();
-  const filtered = state.versions.filter((v) => !q || `${v.hash} ${v.title} ${v.tag || ''} ${v.description || ''}`.toLowerCase().includes(q));
+  const filtered = state.versions.filter((v) => matchesVersionSearch(v, q));
 
   if (!filtered.length) {
     container.innerHTML = '<div class="muted" style="padding:18px;">ไม่พบเวอร์ชันที่ค้นหา</div>';
@@ -4446,27 +4627,53 @@ function renderVersionTimeline() {
 
   container.innerHTML = '';
   for (const v of filtered) {
+    const isMainActive = v.id === state.activeVersionId;
+    const isExactActive = isMainActive && !state.activeSubVersionId;
+    const verLabel = v.versionLabel || `v${v.majorNumber || 1}`;
     const card = document.createElement('article');
-    card.className = 'ver-commit-card';
+    card.className = `ver-commit-card${isMainActive ? ' is-active' : ''}`;
     const timeStr = new Date(v.createdAt).toLocaleString('th-TH', { hour12: false });
+
+    const topGrid = document.createElement('div');
+    topGrid.className = 'ver-card-top';
+
+    if (v.coverUrl) {
+      const coverBtn = document.createElement('button');
+      coverBtn.type = 'button';
+      coverBtn.className = 'ver-cover-thumb';
+      coverBtn.title = 'คลิกเพื่อดูภาพปกสนามขนาดใหญ่';
+      coverBtn.innerHTML = `<img src="${escapeHtml(v.coverUrl)}" alt="${escapeHtml(v.title)}" />`;
+      coverBtn.onclick = () => openLightbox(v.coverUrl, `${verLabel} — ${v.title}`);
+      topGrid.appendChild(coverBtn);
+    } else {
+      const emptyCover = document.createElement('div');
+      emptyCover.className = 'ver-cover-empty';
+      emptyCover.innerHTML = `${svgIcon('map', 'sm')}<span>ไม่มีภาพปก</span>`;
+      topGrid.appendChild(emptyCover);
+    }
+
+    const mainCol = document.createElement('div');
+    mainCol.className = 'ver-card-main';
 
     const head = document.createElement('div');
     head.className = 'ver-card-head';
     head.innerHTML = `
       <div class="ver-card-title-row">
+        <span class="ver-major-badge">${escapeHtml(verLabel)}</span>
         <span class="ver-hash">#${escapeHtml(v.hash)}</span>
         ${v.tag ? `<span class="ver-tag-badge">${escapeHtml(v.tag)}</span>` : ''}
+        ${isExactActive ? '<span class="ver-current-badge">ใช้งานอยู่</span>' : ''}
         <span class="ver-title">${escapeHtml(v.title)}</span>
       </div>
       <span class="ver-meta-time">${escapeHtml(timeStr)}</span>
     `;
-    card.appendChild(head);
+    mainCol.appendChild(head);
 
     if (v.description) {
       const desc = document.createElement('p');
       desc.className = 'ver-desc';
       desc.textContent = v.description;
-      card.appendChild(desc);
+      mainCol.appendChild(desc);
     }
 
     const chips = document.createElement('div');
@@ -4477,15 +4684,22 @@ function renderVersionTimeline() {
       bSpan.textContent = v.blockSummary;
       chips.appendChild(bSpan);
     }
+    const summaryMap = Object.fromEntries((v.changeSummary || []).map((c) => [c.file, c]));
     for (const f of (v.changedFiles || []).slice(0, 6)) {
       const span = document.createElement('span');
-      span.className = 'ver-file-chip';
-      span.textContent = f;
+      const cs = summaryMap[f];
+      span.className = `ver-file-chip${cs ? ' has-delta' : ''}`;
+      if (cs && (cs.added || cs.removed)) {
+        span.innerHTML = `${escapeHtml(f)}<span class="ver-delta-add">+${cs.added}</span><span class="ver-delta-del">-${cs.removed}</span>`;
+      } else {
+        span.textContent = f;
+      }
       chips.appendChild(span);
     }
-    card.appendChild(chips);
+    mainCol.appendChild(chips);
 
-    if (v.images?.length) {
+    // Keep extra legacy image thumbnails visible if a legacy version had >1 images
+    if (v.images?.length > 1 || (v.images?.length === 1 && v.cover?.filename)) {
       const thumbs = document.createElement('div');
       thumbs.className = 'ver-card-thumbs';
       for (const img of v.images) {
@@ -4497,8 +4711,11 @@ function renderVersionTimeline() {
         tb.onclick = () => openLightbox(img.url, `${v.title} — ${img.originalName || img.filename}`);
         thumbs.appendChild(tb);
       }
-      card.appendChild(thumbs);
+      mainCol.appendChild(thumbs);
     }
+
+    topGrid.appendChild(mainCol);
+    card.appendChild(topGrid);
 
     const diffBox = document.createElement('div');
     diffBox.className = 'ver-diff-box';
@@ -4510,8 +4727,8 @@ function renderVersionTimeline() {
     const btnRestore = document.createElement('button');
     btnRestore.type = 'button';
     btnRestore.className = 'btn btn-xs btn-primary';
-    btnRestore.innerHTML = `${svgIcon('restore', 'sm')}<span>ดึงกลับมาใช้ (Restore)</span>`;
-    btnRestore.onclick = () => restoreVersionById(v.id, v.title);
+    btnRestore.innerHTML = `${svgIcon('restore', 'sm')}<span>ดึงกลับมาใช้ (${escapeHtml(verLabel)})</span>`;
+    btnRestore.onclick = () => restoreVersionById(v.id, `${verLabel} — ${v.title}`);
 
     const btnDiff = document.createElement('button');
     btnDiff.type = 'button';
@@ -4523,7 +4740,7 @@ function renderVersionTimeline() {
       diffBox.hidden = false;
       try {
         const detail = await apiJson(`/api/versions/${encodeURIComponent(v.id)}`);
-        diffBox.innerHTML = computeSnapshotDiffLines(detail.snapshot?.files || {});
+        diffBox.innerHTML = computeSnapshotDiffLines(detail.snapshot?.files || {}, state.files);
       } catch (err) {
         diffBox.innerHTML = `<div class="diff-line-del">${escapeHtml(err.message)}</div>`;
       }
@@ -4539,10 +4756,145 @@ function renderVersionTimeline() {
     btnDel.type = 'button';
     btnDel.className = 'btn btn-xs btn-danger-soft';
     btnDel.innerHTML = `${svgIcon('trash', 'sm')}<span>ลบ</span>`;
-    btnDel.onclick = () => deleteVersionById(v.id, v.title);
+    btnDel.onclick = () => deleteVersionById(v.id, `${verLabel} — ${v.title}`);
 
     actions.append(btnRestore, btnDiff, btnEdit, btnDel);
     card.append(actions, diffBox);
+
+    const subs = v.subVersions || [];
+    if (subs.length > 0) {
+      const subSection = document.createElement('div');
+      subSection.className = 'ver-sub-section';
+
+      const defaultExpanded = isMainActive || v.id === state.versions[0]?.id || Boolean(q);
+      const isExpanded = state.verExpandedSubs[v.id] !== undefined ? state.verExpandedSubs[v.id] : defaultExpanded;
+
+      const toggleBtn = document.createElement('button');
+      toggleBtn.type = 'button';
+      toggleBtn.className = 'ver-sub-toggle';
+      toggleBtn.innerHTML = `
+        <span>ประวัติการเซฟ / เวอร์ชันย่อย (${subs.length} รอบ)</span>
+        <span>${isExpanded ? 'ซ่อน ▲' : 'แสดง ▼'}</span>
+      `;
+
+      const subList = document.createElement('div');
+      subList.className = 'ver-sub-list';
+      subList.hidden = !isExpanded;
+
+      toggleBtn.onclick = () => {
+        const next = subList.hidden;
+        state.verExpandedSubs[v.id] = next;
+        subList.hidden = !next;
+        toggleBtn.lastElementChild.textContent = next ? 'ซ่อน ▲' : 'แสดง ▼';
+      };
+
+      for (const sub of subs) {
+        const subActive = isMainActive && state.activeSubVersionId === sub.id;
+        const subItem = document.createElement('div');
+        subItem.className = `ver-sub-item${subActive ? ' is-active' : ''}`;
+        const subTime = new Date(sub.createdAt).toLocaleString('th-TH', { hour12: false });
+
+        const subHead = document.createElement('div');
+        subHead.className = 'ver-sub-head';
+        subHead.innerHTML = `
+          <div class="ver-sub-id-row">
+            <span class="ver-sub-badge">${escapeHtml(sub.versionLabel || `${verLabel}.${sub.seq}`)}</span>
+            <span class="ver-hash">#${escapeHtml(sub.hash || '')}</span>
+            <span class="ver-source-pill">${escapeHtml(formatSaveSourceLabel(sub.source))}</span>
+            ${subActive ? '<span class="ver-current-badge">ใช้งานอยู่</span>' : ''}
+            ${sub.note ? `<span class="muted" style="font-size:11px;">${escapeHtml(sub.note)}</span>` : ''}
+          </div>
+          <span class="ver-meta-time">${escapeHtml(subTime)}</span>
+        `;
+        subItem.appendChild(subHead);
+
+        const subChips = document.createElement('div');
+        subChips.className = 'ver-file-chips';
+        const subCsMap = Object.fromEntries((sub.changeSummary || []).map((c) => [c.file, c]));
+        for (const f of sub.changedFiles || []) {
+          const sp = document.createElement('span');
+          const cs = subCsMap[f];
+          sp.className = `ver-file-chip${cs ? ' has-delta' : ''}`;
+          if (cs && (cs.added || cs.removed)) {
+            sp.innerHTML = `${escapeHtml(f)}<span class="ver-delta-add">+${cs.added}</span><span class="ver-delta-del">-${cs.removed}</span>`;
+          } else {
+            sp.textContent = f;
+          }
+          subChips.appendChild(sp);
+        }
+        subItem.appendChild(subChips);
+
+        const previewRows = (sub.changeSummary || []).flatMap((cs) =>
+          (cs.preview || []).map((line) => ({ file: cs.file, line }))
+        ).slice(0, 4);
+        if (previewRows.length > 0) {
+          const prevBox = document.createElement('div');
+          prevBox.className = 'ver-sub-preview';
+          for (const pr of previewRows) {
+            const lineEl = document.createElement('div');
+            const isAdd = pr.line.startsWith('+');
+            const isDel = pr.line.startsWith('-');
+            lineEl.className = `ver-sub-preview-line${isAdd ? ' add' : isDel ? ' del' : ''}`;
+            lineEl.textContent = `${pr.file}: ${pr.line}`;
+            prevBox.appendChild(lineEl);
+          }
+          subItem.appendChild(prevBox);
+        }
+
+        const subDiffBox = document.createElement('div');
+        subDiffBox.className = 'ver-diff-box';
+        subDiffBox.hidden = true;
+
+        const subActions = document.createElement('div');
+        subActions.className = 'ver-sub-actions';
+
+        const btnSubRestore = document.createElement('button');
+        btnSubRestore.type = 'button';
+        btnSubRestore.className = 'btn btn-xs btn-primary';
+        btnSubRestore.innerHTML = `${svgIcon('restore', 'sm')}<span>กู้คืน ${escapeHtml(sub.versionLabel || '')}</span>`;
+        btnSubRestore.onclick = () => restoreSubVersionById(v.id, sub.id, `${sub.versionLabel} (${v.title})`);
+
+        const btnSubDiff = document.createElement('button');
+        btnSubDiff.type = 'button';
+        btnSubDiff.className = 'btn btn-xs btn-secondary';
+        btnSubDiff.innerHTML = `${svgIcon('diff', 'sm')}<span>ดู Diff</span>`;
+        btnSubDiff.onclick = async () => {
+          if (!subDiffBox.hidden) { subDiffBox.hidden = true; return; }
+          subDiffBox.innerHTML = '<div class="muted">กำลังโหลด Diff ของรอบที่เซฟ...</div>';
+          subDiffBox.hidden = false;
+          try {
+            const detail = await apiJson(`/api/versions/${encodeURIComponent(v.id)}/subversions/${encodeURIComponent(sub.id)}`);
+            const roundOld = detail.snapshot?.prevFiles || {};
+            const roundKeys = Object.keys(roundOld);
+            const roundNew = Object.fromEntries(roundKeys.map((k) => [k, detail.snapshot?.files?.[k] || '']));
+            let html = '<div class="diff-line-hdr">[การแก้ไขในรอบการเซฟนี้]</div>';
+            html += computeSnapshotDiffLines(roundOld, roundNew, 'ไม่มีความต่างของไฟล์โค้ด');
+            if ((sub.changedFiles || []).includes('Field Map')) {
+              html += '<div class="diff-line-hdr">--- Field Map ---</div><div class="diff-line-add">+ ปรับปรุงผังสนาม (Map Manager)</div>';
+            }
+            html += '<div class="diff-line-hdr" style="margin-top:6px;">[เทียบกับโค้ดปัจจุบันใน Editor]</div>';
+            html += computeSnapshotDiffLines(detail.snapshot?.files || {}, state.files, 'ตรงกับโค้ดปัจจุบัน 100%');
+            subDiffBox.innerHTML = html;
+          } catch (err) {
+            subDiffBox.innerHTML = `<div class="diff-line-del">${escapeHtml(err.message)}</div>`;
+          }
+        };
+
+        const btnSubDel = document.createElement('button');
+        btnSubDel.type = 'button';
+        btnSubDel.className = 'btn btn-xs btn-danger-soft';
+        btnSubDel.innerHTML = `${svgIcon('trash', 'sm')}<span>ลบ</span>`;
+        btnSubDel.onclick = () => deleteSubVersionById(v.id, sub.id, sub.versionLabel || sub.id);
+
+        subActions.append(btnSubRestore, btnSubDiff, btnSubDel);
+        subItem.append(subActions, subDiffBox);
+        subList.appendChild(subItem);
+      }
+
+      subSection.append(toggleBtn, subList);
+      card.appendChild(subSection);
+    }
+
     container.appendChild(card);
   }
 }
@@ -4800,11 +5152,21 @@ if ($('btnSimQuickScan')) {
 if ($('btnToggleAutoSave')) $('btnToggleAutoSave').onclick = toggleAutoSave;
 if ($('btnOpenVersions')) $('btnOpenVersions').onclick = openVersionModal;
 if ($('btnCloseVersion')) $('btnCloseVersion').onclick = () => { $('versionModal').hidden = true; };
-if ($('btnVerUploadImg')) $('btnVerUploadImg').onclick = () => $('verImageInput')?.click();
-if ($('verImageInput')) {
-  $('verImageInput').onchange = (e) => { addImageFilesToStaging(e.target.files); e.target.value = ''; };
+if ($('btnVerCoverMode')) {
+  $('btnVerCoverMode').onclick = () => {
+    state.verCoverMode = state.verCoverMode === 'iso' ? '2d' : 'iso';
+    refreshVersionCoverPreview(true);
+  };
 }
-if ($('btnVerCaptureSim')) $('btnVerCaptureSim').onclick = captureSimulatorImage;
+if ($('btnVerRefreshCover')) {
+  $('btnVerRefreshCover').onclick = () => refreshVersionCoverPreview(true);
+}
+if ($('verCoverPreviewBox')) {
+  $('verCoverPreviewBox').onclick = () => {
+    const src = $('verCoverPreviewImg')?.getAttribute('src');
+    if (src) openLightbox(src, $('verCoverMetaText')?.textContent || 'Field Cover');
+  };
+}
 if ($('btnCommitVersion')) $('btnCommitVersion').onclick = commitOrUpdateVersion;
 if ($('btnCancelVerEdit')) $('btnCancelVerEdit').onclick = resetVersionForm;
 if ($('verSearchInput')) $('verSearchInput').oninput = renderVersionTimeline;
@@ -4812,19 +5174,6 @@ if ($('btnCloseLightbox')) $('btnCloseLightbox').onclick = () => { $('imageLight
 if ($('imageLightboxModal')) {
   $('imageLightboxModal').onclick = (e) => { if (e.target === $('imageLightboxModal')) $('imageLightboxModal').hidden = true; };
 }
-
-window.addEventListener('paste', (e) => {
-  if ($('versionModal')?.hidden) return;
-  const items = e.clipboardData?.items || [];
-  const imgFiles = [];
-  for (const item of items) {
-    if (item.type.startsWith('image/')) {
-      const f = item.getAsFile();
-      if (f) imgFiles.push(f);
-    }
-  }
-  if (imgFiles.length > 0) { e.preventDefault(); addImageFilesToStaging(imgFiles); }
-});
 
 $('btnSave').onclick = () => saveFiles(false, false).catch((e) => appendConsole(`[ERR] ${e.message}`));
 $('btnCompile').onclick = compileProject;

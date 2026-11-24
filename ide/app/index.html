@@ -1512,7 +1512,7 @@
           <svg class="svg-ico"><use href="#ico-git"></use></svg>
           <div>
             <h2 id="versionModalTitle">Local Version Control &amp; Snapshot History (.kt-versions)</h2>
-            <p class="muted">บันทึกเวอร์ชันโค้ดและบล็อกลงเครื่อง ตั้งชื่อ เขียนคำอธิบาย แนบรูปสนาม/หุ่นยนต์ และดึงย้อนกลับมาใช้ได้ทุกเวลา</p>
+            <p class="muted">บันทึกเวอร์ชันหลักพร้อมภาพปกสนามอัตโนมัติ เก็บ Log การกดเซฟเป็นเวอร์ชันย่อย และดึงย้อนกลับมาใช้ได้ทุกเวลา</p>
           </div>
         </div>
         <button class="btn-icon" id="btnCloseVersion" type="button" title="ปิดหน้าต่าง">
@@ -1543,19 +1543,22 @@
           </label>
 
           <div class="ver-field">
-            <span>แนบรูปภาพ (รูปสนาม / ตัวหุ่น / Simulator — รองรับ Paste Ctrl+V)</span>
-            <div class="ver-img-actions">
-              <input type="file" id="verImageInput" accept="image/*" multiple hidden />
-              <button class="btn btn-xs btn-secondary" id="btnVerUploadImg" type="button">
-                <svg class="svg-ico sm"><use href="#ico-image"></use></svg>
-                <span>เลือกรูปจากเครื่อง</span>
-              </button>
-              <button class="btn btn-xs btn-secondary" id="btnVerCaptureSim" type="button" title="แคปภาพสนามจำลอง Simulator มาแนบอัตโนมัติ">
-                <svg class="svg-ico sm"><use href="#ico-camera"></use></svg>
-                <span>แคป Simulator</span>
-              </button>
+            <div class="ver-cover-head">
+              <span>ภาพปกจากสนามอัตโนมัติ (Field Cover)</span>
+              <div class="ver-cover-tools">
+                <button class="btn btn-xs btn-secondary" id="btnVerCoverMode" type="button" title="สลับภาพปกสนามระหว่าง 2D และ 3D Isometric">
+                  <span>2D</span>
+                </button>
+                <button class="btn btn-xs btn-ghost" id="btnVerRefreshCover" type="button" title="ดึงภาพสนามปัจจุบันมาอัปเดตภาพปกใหม่">
+                  <svg class="svg-ico sm"><use href="#ico-refresh"></use></svg>
+                  <span>อัปเดตปก</span>
+                </button>
+              </div>
             </div>
-            <div class="ver-staging-grid" id="verStagingImages"></div>
+            <div class="ver-cover-preview" id="verCoverPreviewBox" title="คลิกเพื่อดูภาพปกขนาดใหญ่">
+              <img id="verCoverPreviewImg" src="" alt="Field cover preview" />
+              <span class="ver-cover-meta" id="verCoverMetaText">สนาม 7×7 · 2D Top-Down</span>
+            </div>
           </div>
 
           <div class="ver-changed-hint" id="verChangedFilesHint">ไฟล์ที่กำลังบันทึก: ทุกไฟล์ .ino + Layout + Calibration</div>
@@ -1573,8 +1576,9 @@
           <div class="ver-history-toolbar">
             <div class="ver-search-wrap">
               <svg class="svg-ico sm muted"><use href="#ico-search"></use></svg>
-              <input type="text" id="verSearchInput" placeholder="ค้นหาตามชื่อเวอร์ชัน, แท็ก, คำอธิบาย หรือ Hash..." autocomplete="off" />
+              <input type="text" id="verSearchInput" placeholder="ค้นหาตามชื่อเวอร์ชัน, แท็ก, คำอธิบาย, เวอร์ชันย่อย หรือไฟล์..." autocomplete="off" />
             </div>
+            <span class="ver-active-pill" id="verActiveBadge" title="เวอร์ชันที่กำลังทำงานอยู่ปัจจุบัน">-</span>
             <span class="badge" id="verStoragePathBadge">Local Disk</span>
           </div>
 
