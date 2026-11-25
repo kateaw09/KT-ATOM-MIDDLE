@@ -1,8 +1,8 @@
 // ============================================================================
-// Move.ino — ระบบเคลื่อนที่หลัก (อ้างอิง PT_MIDDLE_ENC_2026Endcode4 + KT_ATOM_Middle HUD)
+// Move.ino — ระบบเคลื่อนที่หลัก (อ้างอิงตาม PT_MIDDLE_ENC_2026Endcode4MOV1 + KT_ATOM_Middle HUD)
 //   - moveForward / moveBackward + 4-Wheel Speed Balance
-//   - BaseFFE / baseBBE / FFE / BBE
-//   - FC / BC / FC4 / BC4
+//   - BaseFFE / baseBBE / FFE / BBE / FFE_turn / BBE_turn
+//   - FC / BC / FC4 / BC4 (รองรับทั้ง 'L'/'R'/'l'/'r' และ 'TL'/'TR'/'Tl'/'Tr' / "TL"/"TR"/"Tl"/"Tr")
 //   - BaseFF / BaseBB / FF / FF_turn / BB / BB_turn (Time-based)
 //   - SetFront_Yaw / SetBack_Yaw / SetFront / SetBack / SetFront_time / SetBack_time / SetF / SetB
 //   - DropF(speed) / DropB(speed) / STOP
@@ -16,34 +16,6 @@ static volatile bool s_missionRunning  = false;
 static unsigned long s_lastHudUpdateMs = 0;
 static unsigned long s_beepStopMs      = 0;
 static bool          s_beepActive      = false;
-
-float current_degree = 0.0f;
-float g_turnExitCarryCm = 0.0f; // + = เยื้องไปข้างหน้าตามแกนหัวหุ่น, - = เยื้องไปข้างหลัง
-
-void clearTurnDistCarry() {
-    g_turnExitCarryCm = 0.0f;
-}
-
-void setTurnDistCarry(float signedCm) {
-    g_turnExitCarryCm = enableTurnDistComp ? constrain(signedCm, -22.0f, 22.0f) : 0.0f;
-}
-
-static float calcTurnEntryCompCm(float absAngleDeg) {
-    if (!enableTurnDistComp || absAngleDeg < 5.0f) return 0.0f;
-    float halfRad = constrain(absAngleDeg, 5.0f, 135.0f) * 0.5f * 0.0174532925f;
-    float innerScale = (turnInnerRatio > 0.01f && turnInnerRatio < 0.85f)
-                           ? ((1.0f + turnInnerRatio) / (1.0f - turnInnerRatio))
-                           : 1.0f;
-    return constrain(turnEntryCompCm * tanf(halfRad) * innerScale, 0.0f, 18.0f);
-}
-
-static float consumeTurnDistCarry(float rawCm, bool forward, float entryCompCm) {
-    float carry = enableTurnDistComp ? g_turnExitCarryCm : 0.0f;
-    g_turnExitCarryCm = 0.0f;
-    float signedPrev = forward ? carry : -carry;
-    float adj = rawCm - signedPrev - entryCompCm;
-    return (adj > 0.0f) ? adj : 0.0f;
-}
 
 static int           s_activeIcon      = 0;
 static int           s_lastDrawnIcon   = -1;
@@ -104,8 +76,6 @@ void resetTargetYaw() {
     setAngleOffset();
     delay(5);
     current_degree = 0.0f;
-    fusedHeadingSyncToImu();
-    clearTurnDistCarry();
 }
 
 unsigned long missionElapsedMs() {
@@ -210,7 +180,6 @@ static void missionHudTask(void* param) {
 void missionStartTimer(int modeNum) {
     if (s_tftMutex == nullptr) s_tftMutex = xSemaphoreCreateMutex();
 
-    clearTurnDistCarry();
     s_missionStartMs  = millis();
     s_pausedTotalMs   = 0;
     s_pauseStartMs    = 0;
@@ -246,7 +215,6 @@ void missionStartTimer(int modeNum) {
 }
 
 void missionEndTimer() {
-    clearTurnDistCarry();
     s_missionRunning = false;
     unsigned long waitStart = millis();
     while (s_hudTaskHandle != nullptr && millis() - waitStart < 200UL) {
@@ -353,49 +321,37 @@ void STOP() {
 }
 
 // ============================================================================
-// 2.1 แกนหลักควบคุมการวิ่งตรงด้วย Encoder+IMU Fusion PD + 4-Wheel Speed Balance
+// แกนหลักควบคุมการเดินหน้า-ถอยหลัง Gyro PD (ตาม Move.ino ของ PT_MIDDLE_ENC_2026Endcode4MOV1)
 // ============================================================================
-static int computeFusedSteer(float KP, float KD, int maxSpeed, float &outErr, int &outBase) {
-    float yaw = 0.0f, yawRate100ms = 0.0f;
-    fusedHeadingUpdate(yaw, yawRate100ms);
-    outErr = wrapAngle180(current_degree - yaw);
-
-    float dTerm = -yawRate100ms * (KD * 0.08f);
-    int pdValue = constrain((int)roundf((outErr * KP) + dTerm), -maxSpeed, maxSpeed);
-
-    // กันล้ออิ่มตัวที่ 100 ตอนหักแก้มุมออกโค้ง (รักษาแรงดึงกลับเต็มที่)
-    int base = maxSpeed;
-    int absPd = abs(pdValue);
-    if (base + absPd > 100) base = max(40, 100 - absPd);
-    outBase = base;
-    return pdValue;
-}
-
 float moveForward(int speed, float &previous_error, float KP, float KD) {
-    float error = 0.0f;
-    int base = speed;
-    int pd_value = computeFusedSteer(KP, KD, speed, error, base);
-
-    int trimL = getLeftMotorTrim();
-    int trimR = getRightMotorTrim();
-    int speed_left  = base + pd_value + trimL;
-    int speed_right = base - pd_value + trimR;
-
+    int max_speed = speed;
+    float kp = KP;
+    float kd = KD;
+    float yaw = safeReadYaw();
+    float error = wrapAngle180(current_degree - yaw);
+    float derivative = error - previous_error;
+    int pd_value = (int)((error * kp) + (derivative * kd));
+    if (pd_value > max_speed) pd_value = max_speed;
+    else if (pd_value < -max_speed) pd_value = -max_speed;
+    int speed_left  = max_speed + pd_value + motor_trim_forward + getLeftMotorTrim();
+    int speed_right = max_speed - pd_value - motor_trim_forward + getRightMotorTrim();
     motorWriteSpeedBalanced(speed_left, speed_right);
     previous_error = error;
     return error;
 }
 
 float moveBackward(int speed, float &previous_error, float KP, float KD) {
-    float error = 0.0f;
-    int base = speed;
-    int pd_value = computeFusedSteer(KP, KD, speed, error, base);
-
-    int trimL = getLeftMotorTrim();
-    int trimR = getRightMotorTrim();
-    int speed_left  = -(base - pd_value) - trimL;
-    int speed_right = -(base + pd_value) - trimR;
-
+    int max_speed = speed;
+    float kp = KP;
+    float kd = KD;
+    float yaw = safeReadYaw();
+    float error = wrapAngle180(current_degree - yaw);
+    float derivative = error - previous_error;
+    int pd_value = (int)((error * kp) + (derivative * kd));
+    if (pd_value > max_speed) pd_value = max_speed;
+    else if (pd_value < -max_speed) pd_value = -max_speed;
+    int speed_left  = -(max_speed - pd_value - motor_trim_backward) - getLeftMotorTrim();
+    int speed_right = -(max_speed + pd_value + motor_trim_backward) - getRightMotorTrim();
     motorWriteSpeedBalanced(speed_left, speed_right);
     previous_error = error;
     return error;
@@ -410,168 +366,332 @@ float moveBackward(int speed, float &previous_error) {
 }
 
 // ============================================================================
-// 2.2 กลุ่มเดินหน้า-ถอยหลังด้วย Encoder: BaseFFE / baseBBE และ FFE / BBE / FC / BC
+// ตัวช่วยเลือกการหมุน/เลี้ยว ('L','R','l','r' และ 'TR','TL','Tr','Tl' / "TR","TL","Tr","Tl")
+// ============================================================================
+static constexpr int TURN_CODE_TR = (((int)'T') << 8) | (int)'R';
+static constexpr int TURN_CODE_TL = (((int)'T') << 8) | (int)'L';
+static constexpr int TURN_CODE_Tr = (((int)'T') << 8) | (int)'r';
+static constexpr int TURN_CODE_Tl = (((int)'T') << 8) | (int)'l';
+
+static inline bool isTTTurnCode(int code) {
+    return code == TURN_CODE_TR || code == TURN_CODE_TL ||
+           code == TURN_CODE_Tr || code == TURN_CODE_Tl;
+}
+
+static int parseTurnSelectStr(const char* select) {
+    if (select == nullptr || select[0] == '\0') return 0;
+    if (select[1] == '\0') return (int)(unsigned char)select[0];
+    if (select[2] == '\0') {
+        return (((int)(unsigned char)select[0]) << 8) | (int)(unsigned char)select[1];
+    }
+    return 0;
+}
+
+static void formatSelectTag(int code, char outTag[4]) {
+    if (isTTTurnCode(code)) {
+        outTag[0] = (char)((code >> 8) & 0xFF);
+        outTag[1] = (char)(code & 0xFF);
+        outTag[2] = '\0';
+    } else {
+        outTag[0] = (char)(code & 0xFF);
+        outTag[1] = '\0';
+    }
+}
+
+static void execSpinSelect(char select) {
+    turn = true;
+    if (select == 'L')      spinDegree(-90);
+    else if (select == 'R') spinDegree(90);
+    else if (select == 'l') spinDegree(-45);
+    else if (select == 'r') spinDegree(45);
+    turn = false;
+}
+
+static void execTurnSelectCode(int select, bool isBack) {
+    turn = true;
+    if (select == 'L') {
+        if (isBack) turnDegreeBack(-90);
+        else        turnDegreeFront(-90);
+    } else if (select == 'R') {
+        if (isBack) turnDegreeBack(90);
+        else        turnDegreeFront(90);
+    } else if (select == 'l') {
+        if (isBack) turnDegreeBack(-45);
+        else        turnDegreeFront(-45);
+    } else if (select == 'r') {
+        if (isBack) turnDegreeBack(45);
+        else        turnDegreeFront(45);
+    } else if (select == TURN_CODE_TR) {
+        if (isBack) TTB90(tt90FastSpeed, tt90SlowSpeed, tt90DistanceCm);
+        else        TTF90(tt90FastSpeed, tt90SlowSpeed, tt90DistanceCm);
+    } else if (select == TURN_CODE_TL) {
+        if (isBack) TTB90(tt90SlowSpeed, tt90FastSpeed, tt90DistanceCm);
+        else        TTF90(tt90SlowSpeed, tt90FastSpeed, tt90DistanceCm);
+    } else if (select == TURN_CODE_Tr) {
+        if (isBack) TTB45(tt45FastSpeed, tt45SlowSpeed, tt45DistanceCm);
+        else        TTF45(tt45FastSpeed, tt45SlowSpeed, tt45DistanceCm);
+    } else if (select == TURN_CODE_Tl) {
+        if (isBack) TTB45(tt45SlowSpeed, tt45FastSpeed, tt45DistanceCm);
+        else        TTF45(tt45SlowSpeed, tt45FastSpeed, tt45DistanceCm);
+    } else {
+        driveStop();
+    }
+    turn = false;
+}
+
+static void execTurnSelectStr(const char* select, bool isBack) {
+    execTurnSelectCode(parseTurnSelectStr(select), isBack);
+}
+
+// ============================================================================
+// กลุ่มเดินหน้า-ถอยหลังด้วย Encoder: BaseFFE / baseBBE และ FFE / BBE / FFE_turn / BBE_turn
+// (ตรงตาม MoveENC.ino ของ PT_MIDDLE_ENC_2026Endcode4MOV1)
 // ============================================================================
 static void baseMoveEncInternal(int Min_speed, int Max_speed, float distance_cm,
                                 unsigned long Ramp_up, long Ramp_down,
                                 float KP, float KD, bool forward, bool stop_at_end,
                                 const char* hudLabel = nullptr, int hudIcon = 0) {
+    int min_speed = Min_speed;
     int max_speed = Max_speed;
-    int min_speed = min(Min_speed, max_speed);
-    long target_ticks    = encoderCentimetersToTicks(fabsf(distance_cm), max_speed);
+    long target_ticks    = encoderCentimetersToTicks(distance_cm, max_speed);
     long ramp_up_ticks   = encoderCentimetersToTicks((float)Ramp_up, max_speed);
     long ramp_down_ticks = encoderCentimetersToTicks((float)Ramp_down, max_speed);
-    long alignTicks      = encoderCentimetersToTicks(4.0f, max_speed);
-
-    int current_speed = min_speed;
-    float initYaw = 0.0f, initRate = 0.0f;
-    fusedHeadingUpdate(initYaw, initRate);
-    float previous_error = wrapAngle180(current_degree - initYaw);
+    int current_speed    = min_speed;
+    float previous_error = 0.0f;
     unsigned long startTime = millis();
     bool hudNotified = (hudLabel == nullptr);
-
-    // ถ้าคำสั่งก่อนหน้าจบแบบยังวิ่งอยู่ในทิศเดียวกัน ให้เริ่มเร่งต่อจากความเร็วนั้นเลย
-    int ramp_base = min_speed;
-    int carry = forward ? g_motionCarrySpeed : -g_motionCarrySpeed;
-    if (carry > ramp_base) ramp_base = min(carry, max_speed);
-
     resetEncoder();
 
     while (true) {
         serviceNonBlockingBeep();
-
+        missionUpdateTimerHUD();
+        unsigned long elapsed_since_start = millis() - startTime;
         long current_ticks = readEncoderDistance();
         if (current_ticks >= target_ticks) {
             if (stop_at_end) driveStop();
-            else             g_motionCarrySpeed = forward ? current_speed : -current_speed;
             break;
         }
-
         long remaining_ticks = target_ticks - current_ticks;
-
-        if (ramp_up_ticks <= 0) {
+        if (ramp_up_ticks == 0) {
             current_speed = max_speed;
         } else if (current_ticks < ramp_up_ticks) {
-            current_speed = ramp_base + (int)(((float)current_ticks / (float)ramp_up_ticks) * (max_speed - ramp_base));
+            current_speed = min_speed + (int)(((float)current_ticks / (float)ramp_up_ticks) * (max_speed - min_speed));
         } else {
             current_speed = max_speed;
         }
-
         if (ramp_down_ticks > 0 && remaining_ticks <= ramp_down_ticks) {
             int ramp_down_speed = min_speed + (int)(((float)remaining_ticks / (float)ramp_down_ticks) * (max_speed - min_speed));
             ramp_down_speed = constrain(ramp_down_speed, min_speed, max_speed);
             if (ramp_down_speed < current_speed) current_speed = ramp_down_speed;
         }
-        current_speed = constrain(current_speed, min_speed, max_speed);
-
-        float stepKp = (current_ticks < alignTicks && fabsf(previous_error) > 3.0f) ? (KP * 1.45f) : KP;
-        if (forward) moveForward(current_speed, previous_error, stepKp, KD);
-        else         moveBackward(current_speed, previous_error, stepKp, KD);
+        if (forward) moveForward(current_speed, previous_error, KP, KD);
+        else         moveBackward(current_speed, previous_error, KP, KD);
 
         if (!hudNotified) {
             hudNotified = true;
             missionNotifyCommand(hudLabel, hudIcon);
         }
 
-        if (millis() - startTime >= 10000UL) {
+        if (elapsed_since_start >= 10000UL) {
             driveStop();
             break;
         }
+        delay(1);
     }
 }
 
 void BaseFFE(int Min_speed, int Max_speed, long encoder_target,
              unsigned long Ramp_up, long Ramp_down, float KP, float KD, bool stop_at_end) {
-    float adjCm = consumeTurnDistCarry((float)encoder_target, true, 0.0f);
-    if (adjCm <= 0.3f) {
-        if (stop_at_end) driveStop();
-        return;
-    }
-    baseMoveEncInternal(Min_speed, Max_speed, adjCm, Ramp_up, Ramp_down, KP, KD, true, stop_at_end);
+    baseMoveEncInternal(Min_speed, Max_speed, (float)encoder_target, Ramp_up, Ramp_down, KP, KD, true, stop_at_end);
 }
 
 void baseBBE(int Min_speed, int Max_speed, long encoder_target,
              unsigned long Ramp_up, long Ramp_down, float KP, float KD, bool stop_at_end) {
-    float adjCm = consumeTurnDistCarry((float)encoder_target, false, 0.0f);
-    if (adjCm <= 0.3f) {
-        if (stop_at_end) driveStop();
-        return;
-    }
-    baseMoveEncInternal(Min_speed, Max_speed, adjCm, Ramp_up, Ramp_down, KP, KD, false, stop_at_end);
+    baseMoveEncInternal(Min_speed, Max_speed, (float)encoder_target, Ramp_up, Ramp_down, KP, KD, false, stop_at_end);
 }
 
-static void execSpinSelect(char select) {
-    if (select == 'L')      spinDegree(-90);
-    else if (select == 'R') spinDegree(90);
-    else if (select == 'l') spinDegree(-45);
-    else if (select == 'r') spinDegree(45);
-    else                    driveStop();
-}
-
-static void execTurnSelect(char select, bool isBack) {
-    int deg = 0;
-    if (select == 'L')      deg = -90;
-    else if (select == 'R') deg =  90;
-    else if (select == 'l') deg = -45;
-    else if (select == 'r') deg =  45;
-    else {
-        driveStop();
-        return;
-    }
-    if (isBack) turnDegreeBack(deg);
-    else        turnDegreeFront(deg);
-}
-
-// --- API สไตล์ PT_MIDDLE_ENC_2026Endcode4 (FFE / BBE) ---
+// --- FFE ---
 void FFE(int speed, long encoder_target) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_enc);
-    int minSpd = min(min_speed_enc, maxSpd);
-    BaseFFE(minSpd, maxSpd, encoder_target, ramp_up, ramp_down, fwdKp, fwdKd, true);
+    speed = constrain(speed, min_speed_enc, max_speed_enc);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "FFE(%d,%ld);", speed, encoder_target);
+    baseMoveEncInternal(min_speed_enc, speed, (float)encoder_target, ramp_up, ramp_down, fwdKp, fwdKd, true, false, cmdBuf, 1);
 }
 
 void FFE(int speed, long encoder_target, unsigned long rUp, long rDown) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_enc);
-    int minSpd = min(min_speed_enc, maxSpd);
-    BaseFFE(minSpd, maxSpd, encoder_target, rUp, rDown, fwdKp, fwdKd, true);
+    speed = constrain(speed, min_speed_enc, max_speed_enc);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "FFE(%d,%ld);", speed, encoder_target);
+    baseMoveEncInternal(min_speed_enc, speed, (float)encoder_target, rUp, rDown, fwdKp, fwdKd, true, true, cmdBuf, 1);
+    missionFinishCommandBeep();
 }
 
 void FFE(int speed, long encoder_target, char select) {
+    s_inCompoundCmd  = true;
+    s_compoundBeeped = false;
+    snprintf(s_compoundMain, sizeof(s_compoundMain), "FFE(%d,%ld,'%c');", speed, encoder_target, select);
     FFE(speed, encoder_target);
     execSpinSelect(select);
+    s_inCompoundCmd = false;
+    missionFinishCommandBeep();
 }
 
 void FFE(int speed, long encoder_target, char select, unsigned long rUp, long rDown) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_enc);
-    int minSpd = min(min_speed_enc, maxSpd);
-    BaseFFE(minSpd, maxSpd, encoder_target, rUp, rDown, fwdKp, fwdKd, true);
+    speed = constrain(speed, min_speed_enc, max_speed_enc);
+    s_inCompoundCmd  = true;
+    s_compoundBeeped = false;
+    snprintf(s_compoundMain, sizeof(s_compoundMain), "FFE(%d,%ld,'%c');", speed, encoder_target, select);
+    char subBuf[22];
+    snprintf(subBuf, sizeof(subBuf), "FFE(%d,%ld)", speed, encoder_target);
+    baseMoveEncInternal(min_speed_enc, speed, (float)encoder_target, rUp, rDown, fwdKp, fwdKd, true, true, subBuf, 1);
     execSpinSelect(select);
+    s_inCompoundCmd = false;
+    missionFinishCommandBeep();
 }
 
+// --- FFE_turn (รองรับทั้ง char 'L'/'R'/'l'/'r' และ int/string 'TL'/'TR'/'Tl'/'Tr' / "TL"/"TR"/"Tl"/"Tr") ---
+void FFE_turn(int speed, long encoder_target) {
+    speed = constrain(speed, min_speed_enc_turn, max_speed_enc_turn);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "FFE_turn(%d,%ld)", speed, encoder_target);
+    baseMoveEncInternal(min_speed_enc_turn, speed, (float)encoder_target, ramp_up_turn, ramp_down_turn, kp_turn, kd_turn, true, false, cmdBuf, 1);
+}
+
+void FFE_turn(int speed, long encoder_target, char select) {
+    FFE_turn(speed, encoder_target, (int)(unsigned char)select, ramp_up_turn, ramp_down_turn);
+}
+
+void FFE_turn(int speed, long encoder_target, int select) {
+    FFE_turn(speed, encoder_target, select, ramp_up_turn, ramp_down_turn);
+}
+
+void FFE_turn(int speed, long encoder_target, const char* select) {
+    FFE_turn(speed, encoder_target, parseTurnSelectStr(select), ramp_up_turn, ramp_down_turn);
+}
+
+void FFE_turn(int speed, long encoder_target, unsigned long rUp, long rDown) {
+    speed = constrain(speed, min_speed_enc_turn, max_speed_enc_turn);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "FFE_turn(%d,%ld)", speed, encoder_target);
+    baseMoveEncInternal(min_speed_enc_turn, speed, (float)encoder_target, rUp, rDown, kp_turn, kd_turn, true, false, cmdBuf, 1);
+}
+
+void FFE_turn(int speed, long encoder_target, char select, unsigned long rUp, long rDown) {
+    FFE_turn(speed, encoder_target, (int)(unsigned char)select, rUp, rDown);
+}
+
+void FFE_turn(int speed, long encoder_target, int select, unsigned long rUp, long rDown) {
+    speed = constrain(speed, min_speed_enc_turn, max_speed_enc_turn);
+    char tag[4];
+    formatSelectTag(select, tag);
+    s_inCompoundCmd  = true;
+    s_compoundBeeped = false;
+    snprintf(s_compoundMain, sizeof(s_compoundMain), "FFE_turn(%d,%ld,'%s')", speed, encoder_target, tag);
+    char subBuf[22];
+    snprintf(subBuf, sizeof(subBuf), "FFE_turn(%d,%ld)", speed, encoder_target);
+    baseMoveEncInternal(min_speed_enc_turn, speed, (float)encoder_target, rUp, rDown, kp_turn, kd_turn, true, false, subBuf, 1);
+    execTurnSelectCode(select, false);
+    s_inCompoundCmd = false;
+    missionFinishCommandBeep();
+}
+
+void FFE_turn(int speed, long encoder_target, const char* select, unsigned long rUp, long rDown) {
+    FFE_turn(speed, encoder_target, parseTurnSelectStr(select), rUp, rDown);
+}
+
+// --- BBE ---
 void BBE(int speed, long encoder_target) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_enc);
-    int minSpd = min(min_speed_enc, maxSpd);
-    baseBBE(minSpd, maxSpd, encoder_target, ramp_up, ramp_down, bwdKp, bwdKd, true);
+    speed = constrain(speed, min_speed_enc, max_speed_enc);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "BBE(%d,%ld);", speed, encoder_target);
+    baseMoveEncInternal(min_speed_enc, speed, (float)encoder_target, ramp_up, ramp_down, bwdKp, bwdKd, false, false, cmdBuf, 2);
 }
 
 void BBE(int speed, long encoder_target, unsigned long rUp, long rDown) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_enc);
-    int minSpd = min(min_speed_enc, maxSpd);
-    baseBBE(minSpd, maxSpd, encoder_target, rUp, rDown, bwdKp, bwdKd, true);
+    speed = constrain(speed, min_speed_enc, max_speed_enc);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "BBE(%d,%ld);", speed, encoder_target);
+    baseMoveEncInternal(min_speed_enc, speed, (float)encoder_target, rUp, rDown, bwdKp, bwdKd, false, true, cmdBuf, 2);
+    missionFinishCommandBeep();
 }
 
 void BBE(int speed, long encoder_target, char select) {
+    s_inCompoundCmd  = true;
+    s_compoundBeeped = false;
+    snprintf(s_compoundMain, sizeof(s_compoundMain), "BBE(%d,%ld,'%c');", speed, encoder_target, select);
     BBE(speed, encoder_target);
     execSpinSelect(select);
+    s_inCompoundCmd = false;
+    missionFinishCommandBeep();
 }
 
 void BBE(int speed, long encoder_target, char select, unsigned long rUp, long rDown) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_enc);
-    int minSpd = min(min_speed_enc, maxSpd);
-    baseBBE(minSpd, maxSpd, encoder_target, rUp, rDown, bwdKp, bwdKd, true);
+    speed = constrain(speed, min_speed_enc, max_speed_enc);
+    s_inCompoundCmd  = true;
+    s_compoundBeeped = false;
+    snprintf(s_compoundMain, sizeof(s_compoundMain), "BBE(%d,%ld,'%c');", speed, encoder_target, select);
+    char subBuf[22];
+    snprintf(subBuf, sizeof(subBuf), "BBE(%d,%ld)", speed, encoder_target);
+    baseMoveEncInternal(min_speed_enc, speed, (float)encoder_target, rUp, rDown, bwdKp, bwdKd, false, true, subBuf, 2);
     execSpinSelect(select);
+    s_inCompoundCmd = false;
+    missionFinishCommandBeep();
 }
 
-// --- API มาตรฐาน KT_ATOM_Middle (FC / BC / FC4 / BC4) ---
+// --- BBE_turn (รองรับทั้ง char 'L'/'R'/'l'/'r' และ int/string 'TL'/'TR'/'Tl'/'Tr' / "TL"/"TR"/"Tl"/"Tr") ---
+void BBE_turn(int speed, long encoder_target) {
+    speed = constrain(speed, min_speed_enc_turn, max_speed_enc_turn);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "BBE_turn(%d,%ld)", speed, encoder_target);
+    baseMoveEncInternal(min_speed_enc_turn, speed, (float)encoder_target, ramp_up_turn, ramp_down_turn, kp_turn, kd_turn, false, false, cmdBuf, 2);
+}
+
+void BBE_turn(int speed, long encoder_target, char select) {
+    BBE_turn(speed, encoder_target, (int)(unsigned char)select, ramp_up_turn, ramp_down_turn);
+}
+
+void BBE_turn(int speed, long encoder_target, int select) {
+    BBE_turn(speed, encoder_target, select, ramp_up_turn, ramp_down_turn);
+}
+
+void BBE_turn(int speed, long encoder_target, const char* select) {
+    BBE_turn(speed, encoder_target, parseTurnSelectStr(select), ramp_up_turn, ramp_down_turn);
+}
+
+void BBE_turn(int speed, long encoder_target, unsigned long rUp, long rDown) {
+    speed = constrain(speed, min_speed_enc_turn, max_speed_enc_turn);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "BBE_turn(%d,%ld)", speed, encoder_target);
+    baseMoveEncInternal(min_speed_enc_turn, speed, (float)encoder_target, rUp, rDown, kp_turn, kd_turn, false, true, cmdBuf, 2);
+    missionFinishCommandBeep();
+}
+
+void BBE_turn(int speed, long encoder_target, char select, unsigned long rUp, long rDown) {
+    BBE_turn(speed, encoder_target, (int)(unsigned char)select, rUp, rDown);
+}
+
+void BBE_turn(int speed, long encoder_target, int select, unsigned long rUp, long rDown) {
+    speed = constrain(speed, min_speed_enc_turn, max_speed_enc_turn);
+    char tag[4];
+    formatSelectTag(select, tag);
+    s_inCompoundCmd  = true;
+    s_compoundBeeped = false;
+    snprintf(s_compoundMain, sizeof(s_compoundMain), "BBE_turn(%d,%ld,'%s')", speed, encoder_target, tag);
+    char subBuf[22];
+    snprintf(subBuf, sizeof(subBuf), "BBE_turn(%d,%ld)", speed, encoder_target);
+    baseMoveEncInternal(min_speed_enc_turn, speed, (float)encoder_target, rUp, rDown, kp_turn, kd_turn, false, false, subBuf, 2);
+    execTurnSelectCode(select, true);
+    s_inCompoundCmd = false;
+    missionFinishCommandBeep();
+}
+
+void BBE_turn(int speed, long encoder_target, const char* select, unsigned long rUp, long rDown) {
+    BBE_turn(speed, encoder_target, parseTurnSelectStr(select), rUp, rDown);
+}
+
+// ============================================================================
+// API มาตรฐาน KT_ATOM_Middle: FC / BC / FC4 / BC4 (รันบนระบบเดินใหม่ + รองรับ 'TL'/'TR'/'Tl'/'Tr')
+// ============================================================================
 static void moveEncTurnWithHud(int speed, float cm, bool forward, bool stopAtEnd,
                                unsigned long rUp, long rDown, const char* label) {
     int maxSpd = constrain(abs(speed), 15, max_speed_enc_turn);
@@ -580,10 +700,9 @@ static void moveEncTurnWithHud(int speed, float cm, bool forward, bool stopAtEnd
     if (stopAtEnd) missionFinishCommandBeep();
 }
 
-static void moveStraightEncComp(int speed, float cm, bool forward, bool stopAtEnd,
-                                unsigned long rUp, long rDown) {
-    float adjCm = consumeTurnDistCarry(cm, forward, 0.0f);
-    if (adjCm <= 0.3f) {
+static void moveStraightEnc(int speed, float cm, bool forward, bool stopAtEnd,
+                            unsigned long rUp, long rDown) {
+    if (cm <= 0.0f) {
         if (stopAtEnd) {
             driveStop();
             missionFinishCommandBeep();
@@ -591,28 +710,24 @@ static void moveStraightEncComp(int speed, float cm, bool forward, bool stopAtEn
         return;
     }
     char cmdBuf[24];
-    if (fabsf(adjCm - cm) >= 0.1f) {
-        snprintf(cmdBuf, sizeof(cmdBuf), forward ? "FC(%d,%.1f);" : "BC(%d,%.1f);", speed, adjCm);
-    } else {
-        snprintf(cmdBuf, sizeof(cmdBuf), forward ? "FC(%d,%.0f);" : "BC(%d,%.0f);", speed, cm);
-    }
-    moveEncTurnWithHud(speed, adjCm, forward, stopAtEnd, rUp, rDown, cmdBuf);
+    snprintf(cmdBuf, sizeof(cmdBuf), forward ? "FC(%d,%.0f);" : "BC(%d,%.0f);", speed, cm);
+    moveEncTurnWithHud(speed, cm, forward, stopAtEnd, rUp, rDown, cmdBuf);
 }
 
 void FC(int speed, float cm, bool stopAtEnd) {
-    moveStraightEncComp(speed, cm, true, stopAtEnd, ramp_up_turn, ramp_down_turn);
+    moveStraightEnc(speed, cm, true, stopAtEnd, ramp_up_turn, ramp_down_turn);
 }
 
 void FC(int speed, float cm, int rUp, int rDown) {
-    moveStraightEncComp(speed, cm, true, true, (unsigned long)max(0, rUp), (long)max(0, rDown));
+    moveStraightEnc(speed, cm, true, true, (unsigned long)max(0, rUp), (long)max(0, rDown));
 }
 
 void BC(int speed, float cm, bool stopAtEnd) {
-    moveStraightEncComp(speed, cm, false, stopAtEnd, ramp_up_turn, ramp_down_turn);
+    moveStraightEnc(speed, cm, false, stopAtEnd, ramp_up_turn, ramp_down_turn);
 }
 
 void BC(int speed, float cm, int rUp, int rDown) {
-    moveStraightEncComp(speed, cm, false, true, (unsigned long)max(0, rUp), (long)max(0, rDown));
+    moveStraightEnc(speed, cm, false, true, (unsigned long)max(0, rUp), (long)max(0, rDown));
 }
 
 static void moveCompoundTurn(int speed, float cm, char dir, bool forward, float angleOverride,
@@ -630,35 +745,61 @@ static void moveCompoundTurn(int speed, float cm, char dir, bool forward, float 
         turnAngle = isLeft ? -mag : mag;
     }
 
-    float entryCompCm = (isValid && !doStopAndSpin) ? calcTurnEntryCompCm(fabsf(turnAngle)) : 0.0f;
-    float adjCm = consumeTurnDistCarry(cm, forward, entryCompCm);
-
     s_inCompoundCmd  = true;
     s_compoundBeeped = false;
     snprintf(s_compoundMain, sizeof(s_compoundMain), fmtMain, speed, cm, dir);
 
-    long effectiveRDown = doStopAndSpin ? rDown : 0;
-    if (adjCm > 0.3f) {
+    if (cm > 0.0f) {
         char subBuf[22];
-        if (fabsf(adjCm - cm) >= 0.1f) {
-            snprintf(subBuf, sizeof(subBuf), forward ? "FC(%d,%.1f)" : "BC(%d,%.1f)", speed, adjCm);
-        } else {
-            snprintf(subBuf, sizeof(subBuf), forward ? "FC(%d,%.0f)" : "BC(%d,%.0f)", speed, cm);
-        }
-        moveEncTurnWithHud(speed, adjCm, forward, doStopAndSpin, rUp, effectiveRDown, subBuf);
+        snprintf(subBuf, sizeof(subBuf), forward ? "FC(%d,%.0f)" : "BC(%d,%.0f)", speed, cm);
+        moveEncTurnWithHud(speed, cm, forward, doStopAndSpin, rUp, rDown, subBuf);
     } else if (doStopAndSpin) {
         driveStop();
     }
 
     if (!isValid) {
         driveStop();
-    } else if (doStopAndSpin) {
-        delay(10);
-        SpinDegree(turnAngle);
     } else {
-        turnSwingContinuous(turnAngle, -1, !forward);
+        turn = true;
+        if (doStopAndSpin) {
+            SpinDegree(turnAngle, -1, true);
+        } else if (forward) {
+            TrunDegreeFront(turnAngle, -1, true);
+        } else {
+            TrunDegreeBack(turnAngle, -1, true);
+        }
+        turn = false;
     }
 
+    s_inCompoundCmd = false;
+    missionFinishCommandBeep();
+}
+
+static void moveCompoundCode(int speed, float cm, int select, bool forward, bool stopBeforeTurn,
+                             unsigned long rUp, long rDown) {
+    if (!isTTTurnCode(select)) {
+        moveCompoundTurn(speed, cm, (char)(select & 0xFF), forward, 0.0f,
+                         forward ? "FC(%d,%.0f,'%c');" : "BC(%d,%.0f,'%c');",
+                         stopBeforeTurn, rUp, rDown);
+        return;
+    }
+
+    char tag[4];
+    formatSelectTag(select, tag);
+    s_inCompoundCmd  = true;
+    s_compoundBeeped = false;
+    snprintf(s_compoundMain, sizeof(s_compoundMain), forward ? "FC(%d,%.0f,'%s');" : "BC(%d,%.0f,'%s');",
+             speed, cm, tag);
+
+    if (cm > 0.0f) {
+        char subBuf[22];
+        snprintf(subBuf, sizeof(subBuf), forward ? "FC(%d,%.0f)" : "BC(%d,%.0f)", speed, cm);
+        moveEncTurnWithHud(speed, cm, forward, stopBeforeTurn, rUp, rDown, subBuf);
+    } else if (stopBeforeTurn) {
+        driveStop();
+    }
+
+    execTurnSelectCode(select, !forward);
     s_inCompoundCmd = false;
     missionFinishCommandBeep();
 }
@@ -667,24 +808,64 @@ void FC(int speed, float cm, char dir) {
     moveCompoundTurn(speed, cm, dir, true, 0.0f, "FC(%d,%.0f,'%c');", false, ramp_up_turn, ramp_down_turn);
 }
 
-void BC(int speed, float cm, char dir) {
-    moveCompoundTurn(speed, cm, dir, false, 0.0f, "BC(%d,%.0f,'%c');", false, ramp_up_turn, ramp_down_turn);
+void FC(int speed, float cm, int select) {
+    moveCompoundCode(speed, cm, select, true, false, ramp_up_turn, ramp_down_turn);
+}
+
+void FC(int speed, float cm, const char* select) {
+    moveCompoundCode(speed, cm, parseTurnSelectStr(select), true, false, ramp_up_turn, ramp_down_turn);
 }
 
 void FC(int speed, float cm, char dir, bool stopBeforeTurn) {
     moveCompoundTurn(speed, cm, dir, true, 0.0f, "FC(%d,%.0f,'%c');", stopBeforeTurn, ramp_up_turn, ramp_down_turn);
 }
 
-void BC(int speed, float cm, char dir, bool stopBeforeTurn) {
-    moveCompoundTurn(speed, cm, dir, false, 0.0f, "BC(%d,%.0f,'%c');", stopBeforeTurn, ramp_up_turn, ramp_down_turn);
+void FC(int speed, float cm, const char* select, bool stopBeforeTurn) {
+    moveCompoundCode(speed, cm, parseTurnSelectStr(select), true, stopBeforeTurn, ramp_up_turn, ramp_down_turn);
 }
 
 void FC(int speed, float cm, char dir, unsigned long rUp, long rDown) {
     moveCompoundTurn(speed, cm, dir, true, 0.0f, "FC(%d,%.0f,'%c');", false, rUp, rDown);
 }
 
+void FC(int speed, float cm, int select, unsigned long rUp, long rDown) {
+    moveCompoundCode(speed, cm, select, true, false, rUp, rDown);
+}
+
+void FC(int speed, float cm, const char* select, unsigned long rUp, long rDown) {
+    moveCompoundCode(speed, cm, parseTurnSelectStr(select), true, false, rUp, rDown);
+}
+
+void BC(int speed, float cm, char dir) {
+    moveCompoundTurn(speed, cm, dir, false, 0.0f, "BC(%d,%.0f,'%c');", false, ramp_up_turn, ramp_down_turn);
+}
+
+void BC(int speed, float cm, int select) {
+    moveCompoundCode(speed, cm, select, false, false, ramp_up_turn, ramp_down_turn);
+}
+
+void BC(int speed, float cm, const char* select) {
+    moveCompoundCode(speed, cm, parseTurnSelectStr(select), false, false, ramp_up_turn, ramp_down_turn);
+}
+
+void BC(int speed, float cm, char dir, bool stopBeforeTurn) {
+    moveCompoundTurn(speed, cm, dir, false, 0.0f, "BC(%d,%.0f,'%c');", stopBeforeTurn, ramp_up_turn, ramp_down_turn);
+}
+
+void BC(int speed, float cm, const char* select, bool stopBeforeTurn) {
+    moveCompoundCode(speed, cm, parseTurnSelectStr(select), false, stopBeforeTurn, ramp_up_turn, ramp_down_turn);
+}
+
 void BC(int speed, float cm, char dir, unsigned long rUp, long rDown) {
     moveCompoundTurn(speed, cm, dir, false, 0.0f, "BC(%d,%.0f,'%c');", false, rUp, rDown);
+}
+
+void BC(int speed, float cm, int select, unsigned long rUp, long rDown) {
+    moveCompoundCode(speed, cm, select, false, false, rUp, rDown);
+}
+
+void BC(int speed, float cm, const char* select, unsigned long rUp, long rDown) {
+    moveCompoundCode(speed, cm, parseTurnSelectStr(select), false, false, rUp, rDown);
 }
 
 void FC4(int speed, float cm, char dir) {
@@ -704,22 +885,24 @@ void BC4(int speed, float cm, char dir, bool stopBeforeTurn) {
 }
 
 // ============================================================================
-// 2.3 กลุ่มเดินหน้า-ถอยหลังด้วยเวลา: BaseFF / BaseBB / FF / FF_turn / BB / BB_turn
+// กลุ่มเดินหน้า-ถอยหลังด้วยเวลา: BaseFF / BaseBB / FF / FF_turn / BB / BB_turn
+// (ตรงตาม MoveTIME.ino ของ PT_MIDDLE_ENC_2026Endcode4MOV1)
 // ============================================================================
 static void baseMoveTimeInternal(int Min_speed, int Max_speed, unsigned long time_target,
                                  unsigned long Ramp_up, unsigned long Ramp_down,
-                                 float KP, float KD, bool forward, bool stop_at_end) {
-    clearTurnDistCarry();
+                                 float KP, float KD, bool forward, bool stop_at_end,
+                                 const char* hudLabel = nullptr, int hudIcon = 0) {
+    int min_speed = Min_speed;
     int max_speed = Max_speed;
-    int min_speed = min(Min_speed, max_speed);
     int current_speed = min_speed;
-    float previous_error = wrapAngle180(current_degree - readAngle(YAW));
+    float previous_error = 0.0f;
     bool timer_started = false;
     const int angle_tolerance = 10;
 
     unsigned long timer = 0;
     unsigned long rampStartTime = 0;
     unsigned long startTime = millis();
+    bool hudNotified = (hudLabel == nullptr);
 
     while (true) {
         serviceNonBlockingBeep();
@@ -730,10 +913,13 @@ static void baseMoveTimeInternal(int Min_speed, int Max_speed, unsigned long tim
             current_speed = (Ramp_up == 0) ? max_speed : min_speed;
         } else {
             unsigned long ramp_elapsed = millis() - rampStartTime;
-            if (Ramp_up == 0) current_speed = max_speed;
-            else if (ramp_elapsed <= Ramp_up)
+            if (Ramp_up == 0) {
+                current_speed = max_speed;
+            } else if (ramp_elapsed <= Ramp_up) {
                 current_speed = min_speed + (int)(((float)ramp_elapsed / (float)Ramp_up) * (max_speed - min_speed));
-            else current_speed = max_speed;
+            } else {
+                current_speed = max_speed;
+            }
         }
 
         if (timer_started && Ramp_down > 0) {
@@ -749,6 +935,11 @@ static void baseMoveTimeInternal(int Min_speed, int Max_speed, unsigned long tim
         float error = forward ? moveForward(current_speed, previous_error, KP, KD)
                               : moveBackward(current_speed, previous_error, KP, KD);
 
+        if (!hudNotified) {
+            hudNotified = true;
+            missionNotifyCommand(hudLabel, hudIcon);
+        }
+
         if (!timer_started && fabsf(error) <= (float)angle_tolerance) {
             timer = millis();
             rampStartTime = millis();
@@ -762,6 +953,7 @@ static void baseMoveTimeInternal(int Min_speed, int Max_speed, unsigned long tim
             driveStop();
             break;
         }
+        delay(1);
     }
 }
 
@@ -776,81 +968,139 @@ void BaseBB(int Min_speed, int Max_speed, unsigned long time_target,
 }
 
 void FF(int speed, unsigned long timer) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_time);
-    int minSpd = min(min_speed_time, maxSpd);
-    BaseFF(minSpd, maxSpd, timer, ramp_up_ms, ramp_down_ms, kp_time, kd_time, true);
+    speed = constrain(speed, min_speed_time, max_speed_time);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "FF(%d,%lu);", speed, timer);
+    baseMoveTimeInternal(min_speed_time, speed, timer, ramp_up_ms, ramp_down_ms, kp_time, kd_time, true, true, cmdBuf, 1);
+    missionFinishCommandBeep();
     delay(delayALL);
 }
 
 void FF(int speed, unsigned long timer, unsigned long rUp, unsigned long rDown) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_time);
-    int minSpd = min(min_speed_time, maxSpd);
-    BaseFF(minSpd, maxSpd, timer, rUp, rDown, kp_time, kd_time, true);
+    speed = constrain(speed, min_speed_time, max_speed_time);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "FF(%d,%lu);", speed, timer);
+    baseMoveTimeInternal(min_speed_time, speed, timer, rUp, rDown, kp_time, kd_time, true, true, cmdBuf, 1);
+    missionFinishCommandBeep();
     delay(delayALL);
 }
 
 void FF(int speed, unsigned long timer, char select) {
-    FF(speed, timer);
+    speed = constrain(speed, min_speed_time, max_speed_time);
+    s_inCompoundCmd  = true;
+    s_compoundBeeped = false;
+    snprintf(s_compoundMain, sizeof(s_compoundMain), "FF(%d,%lu,'%c');", speed, timer, select);
+    char subBuf[22];
+    snprintf(subBuf, sizeof(subBuf), "FF(%d,%lu)", speed, timer);
+    baseMoveTimeInternal(min_speed_time, speed, timer, ramp_up_ms, ramp_down_ms, kp_time, kd_time, true, true, subBuf, 1);
     execSpinSelect(select);
+    s_inCompoundCmd = false;
+    missionFinishCommandBeep();
     delay(delayALL);
 }
 
 void FF_turn(int speed, unsigned long timer) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_time_turn);
-    int minSpd = min(min_speed_time_turn, maxSpd);
-    BaseFF(minSpd, maxSpd, timer, ramp_up_time_turn, ramp_down_time_turn, kp_time_turn, kd_time_turn, true);
+    speed = constrain(speed, min_speed_time_turn, max_speed_time_turn);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "FF_turn(%d,%lu)", speed, timer);
+    baseMoveTimeInternal(min_speed_time_turn, speed, timer, ramp_up_time_turn, ramp_down_time_turn, kp_time_turn, kd_time_turn, true, true, cmdBuf, 1);
+    missionFinishCommandBeep();
 }
 
 void FF_turn(int speed, unsigned long timer, char select) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_time_turn);
-    int minSpd = min(min_speed_time_turn, maxSpd);
-    BaseFF(minSpd, maxSpd, timer, ramp_up_time_turn, ramp_down_time_turn, kp_time_turn, kd_time_turn, false);
-    execTurnSelect(select, false);
+    FF_turn(speed, timer, (int)(unsigned char)select);
+}
+
+void FF_turn(int speed, unsigned long timer, int select) {
+    speed = constrain(speed, min_speed_time_turn, max_speed_time_turn);
+    char tag[4];
+    formatSelectTag(select, tag);
+    s_inCompoundCmd  = true;
+    s_compoundBeeped = false;
+    snprintf(s_compoundMain, sizeof(s_compoundMain), "FF_turn(%d,%lu,'%s')", speed, timer, tag);
+    char subBuf[22];
+    snprintf(subBuf, sizeof(subBuf), "FF_turn(%d,%lu)", speed, timer);
+    baseMoveTimeInternal(min_speed_time_turn, speed, timer, ramp_up_time_turn, ramp_down_time_turn, kp_time_turn, kd_time_turn, true, false, subBuf, 1);
+    execTurnSelectCode(select, false);
+    s_inCompoundCmd = false;
+    missionFinishCommandBeep();
+}
+
+void FF_turn(int speed, unsigned long timer, const char* select) {
+    FF_turn(speed, timer, parseTurnSelectStr(select));
 }
 
 void BB(int speed, unsigned long timer) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_time);
-    int minSpd = min(min_speed_time, maxSpd);
-    BaseBB(minSpd, maxSpd, timer, ramp_up_ms, ramp_down_ms, kp_time, kd_time, true);
+    speed = constrain(speed, min_speed_time, max_speed_time);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "BB(%d,%lu);", speed, timer);
+    baseMoveTimeInternal(min_speed_time, speed, timer, ramp_up_ms, ramp_down_ms, kp_time, kd_time, false, true, cmdBuf, 2);
+    missionFinishCommandBeep();
     delay(delayALL);
 }
 
 void BB(int speed, unsigned long timer, unsigned long rUp, unsigned long rDown) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_time);
-    int minSpd = min(min_speed_time, maxSpd);
-    BaseBB(minSpd, maxSpd, timer, rUp, rDown, kp_time, kd_time, true);
+    speed = constrain(speed, min_speed_time, max_speed_time);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "BB(%d,%lu);", speed, timer);
+    baseMoveTimeInternal(min_speed_time, speed, timer, rUp, rDown, kp_time, kd_time, false, true, cmdBuf, 2);
+    missionFinishCommandBeep();
     delay(delayALL);
 }
 
 void BB(int speed, unsigned long timer, char select) {
-    BB(speed, timer);
+    speed = constrain(speed, min_speed_time, max_speed_time);
+    s_inCompoundCmd  = true;
+    s_compoundBeeped = false;
+    snprintf(s_compoundMain, sizeof(s_compoundMain), "BB(%d,%lu,'%c');", speed, timer, select);
+    char subBuf[22];
+    snprintf(subBuf, sizeof(subBuf), "BB(%d,%lu)", speed, timer);
+    baseMoveTimeInternal(min_speed_time, speed, timer, ramp_up_ms, ramp_down_ms, kp_time, kd_time, false, true, subBuf, 2);
     execSpinSelect(select);
+    s_inCompoundCmd = false;
+    missionFinishCommandBeep();
     delay(delayALL);
 }
 
 void BB_turn(int speed, unsigned long timer) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_time_turn);
-    int minSpd = min(min_speed_time_turn, maxSpd);
-    BaseBB(minSpd, maxSpd, timer, ramp_up_time_turn, ramp_down_time_turn, kp_time_turn, kd_time_turn, true);
+    speed = constrain(speed, min_speed_time_turn, max_speed_time_turn);
+    char cmdBuf[24];
+    snprintf(cmdBuf, sizeof(cmdBuf), "BB_turn(%d,%lu)", speed, timer);
+    baseMoveTimeInternal(min_speed_time_turn, speed, timer, ramp_up_time_turn, ramp_down_time_turn, kp_time_turn, kd_time_turn, false, true, cmdBuf, 2);
+    missionFinishCommandBeep();
 }
 
 void BB_turn(int speed, unsigned long timer, char select) {
-    int maxSpd = constrain(abs(speed), 15, max_speed_time_turn);
-    int minSpd = min(min_speed_time_turn, maxSpd);
-    BaseBB(minSpd, maxSpd, timer, ramp_up_time_turn, ramp_down_time_turn, kp_time_turn, kd_time_turn, false);
-    execTurnSelect(select, true);
+    BB_turn(speed, timer, (int)(unsigned char)select);
+}
+
+void BB_turn(int speed, unsigned long timer, int select) {
+    speed = constrain(speed, min_speed_time_turn, max_speed_time_turn);
+    char tag[4];
+    formatSelectTag(select, tag);
+    s_inCompoundCmd  = true;
+    s_compoundBeeped = false;
+    snprintf(s_compoundMain, sizeof(s_compoundMain), "BB_turn(%d,%lu,'%s')", speed, timer, tag);
+    char subBuf[22];
+    snprintf(subBuf, sizeof(subBuf), "BB_turn(%d,%lu)", speed, timer);
+    baseMoveTimeInternal(min_speed_time_turn, speed, timer, ramp_up_time_turn, ramp_down_time_turn, kp_time_turn, kd_time_turn, false, false, subBuf, 2);
+    execTurnSelectCode(select, true);
+    s_inCompoundCmd = false;
+    missionFinishCommandBeep();
+}
+
+void BB_turn(int speed, unsigned long timer, const char* select) {
+    BB_turn(speed, timer, parseTurnSelectStr(select));
 }
 
 // ============================================================================
-// 2.7 กลุ่มจัดแนวเข้าเส้นดำและรีเซ็ต Gyroscope (SetFront_Yaw / SetBack_Yaw / SetF / SetB)
+// กลุ่มจัดแนวเข้าเส้นดำและรีเซ็ต Gyroscope (ตาม Move.ino ของ PT_MIDDLE_ENC_2026Endcode4MOV1)
 // ============================================================================
 bool SetFront_Yaw(int speed) {
-    clearTurnDistCarry();
     missionNotifyCommand("SetF();", 9);
     const unsigned long align_timeout = 2500;
     unsigned long start_time = millis();
-    float previous_error = wrapAngle180(current_degree - readAngle(YAW));
-    int spd = constrain(abs(speed), 15, 60);
+    float previous_error = 0.0f;
 
     while (true) {
         serviceNonBlockingBeep();
@@ -859,16 +1109,17 @@ bool SetFront_Yaw(int speed) {
 
         bool S0 = line_value[0] <= sensorDifference; // FL
         bool S1 = line_value[1] <= sensorDifference; // FR
+
         if (S0 && S1) {
             driveStop();
             break;
         }
 
         if (!S0 && !S1) {
-            moveForward(spd, previous_error);
+            previous_error = moveForward(speed, previous_error);
         } else {
-            int left_speed  = S0 ? -spd : spd;
-            int right_speed = S1 ? -spd : spd;
+            int left_speed  = S0 ? -speed : speed;
+            int right_speed = S1 ? -speed : speed;
             motorWriteSpeedBalanced(left_speed, right_speed);
         }
 
@@ -876,6 +1127,7 @@ bool SetFront_Yaw(int speed) {
             driveStop();
             return false;
         }
+        delay(1);
     }
     delay(100);
     resetTargetYaw();
@@ -895,41 +1147,35 @@ bool SetFront_Yaw(int speed, unsigned long target, char select) {
     return true;
 }
 
-void SetFront(int speed) {
-    clearTurnDistCarry();
-    float previous_error = wrapAngle180(current_degree - readAngle(YAW));
+static void alignLineSensors(int speed, bool forward, unsigned long postDelayMs) {
+    float previous_error = 0.0f;
     unsigned long start_time = millis();
-    int spd = constrain(abs(speed), 15, 60);
-    while (millis() - start_time < 2500UL) {
+    byte sA = forward ? 0 : 2;
+    byte sB = forward ? 1 : 3;
+    while (millis() - start_time < 5000UL) {
         serviceNonBlockingBeep();
         missionUpdateTimerHUD();
         readLine();
-        if (line_value[0] <= sensorDifference && line_value[1] <= sensorDifference) {
+        if (line_value[sA] <= sensorDifference && line_value[sB] <= sensorDifference) {
             driveStop();
             break;
         }
-        moveForward(spd, previous_error);
+        if (forward) moveForward(speed, previous_error);
+        else         moveBackward(speed, previous_error);
+        delay(1);
     }
     driveStop();
-    delay(100);
+    if (postDelayMs > 0) delay(postDelayMs);
+}
+
+void SetFront(int speed) {
+    missionNotifyCommand("SetFront", 9);
+    alignLineSensors(speed, true, 100);
+    missionFinishCommandBeep();
 }
 
 void SetFront_drop(int speed) {
-    clearTurnDistCarry();
-    float previous_error = wrapAngle180(current_degree - readAngle(YAW));
-    unsigned long start_time = millis();
-    int spd = constrain(abs(speed), 15, 60);
-    while (millis() - start_time < 2500UL) {
-        serviceNonBlockingBeep();
-        missionUpdateTimerHUD();
-        readLine();
-        if (line_value[0] <= sensorDifference && line_value[1] <= sensorDifference) {
-            driveStop();
-            break;
-        }
-        moveForward(spd, previous_error);
-    }
-    driveStop();
+    alignLineSensors(speed, true, 0);
 }
 
 void SetFront(int speed, unsigned long target) {
@@ -953,12 +1199,10 @@ void SetFront_time(int speed, unsigned long target, char select) {
 }
 
 bool SetBack_Yaw(int speed) {
-    clearTurnDistCarry();
     missionNotifyCommand("SetB();", 10);
     const unsigned long align_timeout = 2500;
     unsigned long start_time = millis();
-    float previous_error = wrapAngle180(current_degree - readAngle(YAW));
-    int spd = constrain(abs(speed), 15, 60);
+    float previous_error = 0.0f;
 
     while (true) {
         serviceNonBlockingBeep();
@@ -967,16 +1211,17 @@ bool SetBack_Yaw(int speed) {
 
         bool S2 = line_value[2] <= sensorDifference; // BR
         bool S3 = line_value[3] <= sensorDifference; // BL
+
         if (S2 && S3) {
             driveStop();
             break;
         }
 
         if (!S2 && !S3) {
-            moveBackward(spd, previous_error);
+            previous_error = moveBackward(speed, previous_error);
         } else {
-            int left_speed  = S3 ? spd : -spd;
-            int right_speed = S2 ? spd : -spd;
+            int left_speed  = S3 ? speed : -speed;
+            int right_speed = S2 ? speed : -speed;
             motorWriteSpeedBalanced(left_speed, right_speed);
         }
 
@@ -984,6 +1229,7 @@ bool SetBack_Yaw(int speed) {
             driveStop();
             return false;
         }
+        delay(1);
     }
     delay(100);
     resetTargetYaw();
@@ -1004,40 +1250,13 @@ bool SetBack_Yaw(int speed, unsigned long target, char select) {
 }
 
 void SetBack(int speed) {
-    clearTurnDistCarry();
-    float previous_error = wrapAngle180(current_degree - readAngle(YAW));
-    unsigned long start_time = millis();
-    int spd = constrain(abs(speed), 15, 60);
-    while (millis() - start_time < 2500UL) {
-        serviceNonBlockingBeep();
-        missionUpdateTimerHUD();
-        readLine();
-        if (line_value[2] <= sensorDifference && line_value[3] <= sensorDifference) {
-            driveStop();
-            break;
-        }
-        moveBackward(spd, previous_error);
-    }
-    driveStop();
-    delay(100);
+    missionNotifyCommand("SetBack", 10);
+    alignLineSensors(speed, false, 100);
+    missionFinishCommandBeep();
 }
 
 void SetBack_drop(int speed) {
-    clearTurnDistCarry();
-    float previous_error = wrapAngle180(current_degree - readAngle(YAW));
-    unsigned long start_time = millis();
-    int spd = constrain(abs(speed), 15, 60);
-    while (millis() - start_time < 2500UL) {
-        serviceNonBlockingBeep();
-        missionUpdateTimerHUD();
-        readLine();
-        if (line_value[2] <= sensorDifference && line_value[3] <= sensorDifference) {
-            driveStop();
-            break;
-        }
-        moveBackward(spd, previous_error);
-    }
-    driveStop();
+    alignLineSensors(speed, false, 0);
 }
 
 void SetBack(int speed, unsigned long target) {
@@ -1060,6 +1279,13 @@ void SetBack_time(int speed, unsigned long target, char select) {
     execSpinSelect(select);
 }
 
+void limitMotorTrim() {
+    if (motor_trim_forward > 30) motor_trim_forward = 30;
+    else if (motor_trim_forward < -30) motor_trim_forward = -30;
+    if (motor_trim_backward > 30) motor_trim_backward = 30;
+    else if (motor_trim_backward < -30) motor_trim_backward = -30;
+}
+
 // --- API มาตรฐาน KT_ATOM_Middle (SetF / SetB / DropF(speed) / DropB(speed)) ---
 void SetF(int speed) {
     SetFront_Yaw(speed);
@@ -1071,7 +1297,9 @@ void SetF(int speed, float backCm) {
     snprintf(s_compoundMain, sizeof(s_compoundMain), "SetF(%d,%.0f);", speed, backCm);
     SetFront_Yaw(speed);
     if (backCm > 0.0f) {
-        BC(speed, backCm, true);
+        int maxSpd = constrain(abs(speed), 15, max_speed_enc);
+        int minSpd = min(min_speed_enc, maxSpd);
+        baseMoveEncInternal(minSpd, maxSpd, backCm, 0, 0, bwdKp, bwdKd, false, true, "BBE", 2);
     }
     s_inCompoundCmd = false;
     missionFinishCommandBeep();
@@ -1083,11 +1311,12 @@ void SetF(int speed, float backCm, char dir) {
     snprintf(s_compoundMain, sizeof(s_compoundMain), "SetF(%d,%.0f,'%c');", speed, backCm, dir);
     SetFront_Yaw(speed);
     if (backCm > 0.0f) {
-        BC(speed, backCm, true);
+        int maxSpd = constrain(abs(speed), 15, max_speed_enc);
+        int minSpd = min(min_speed_enc, maxSpd);
+        baseMoveEncInternal(minSpd, maxSpd, backCm, 0, 0, bwdKp, bwdKd, false, true, "BBE", 2);
         delay(10);
     }
-    if (dir == 'L' || dir == 'l')      SpinDegree(-90.0f);
-    else if (dir == 'R' || dir == 'r') SpinDegree(90.0f);
+    execSpinSelect(dir);
     s_inCompoundCmd = false;
     missionFinishCommandBeep();
 }
@@ -1102,7 +1331,9 @@ void SetB(int speed, float fwdCm) {
     snprintf(s_compoundMain, sizeof(s_compoundMain), "SetB(%d,%.0f);", speed, fwdCm);
     SetBack_Yaw(speed);
     if (fwdCm > 0.0f) {
-        FC(speed, fwdCm, true);
+        int maxSpd = constrain(abs(speed), 15, max_speed_enc);
+        int minSpd = min(min_speed_enc, maxSpd);
+        baseMoveEncInternal(minSpd, maxSpd, fwdCm, 0, 0, fwdKp, fwdKd, true, true, "FFE", 1);
     }
     s_inCompoundCmd = false;
     missionFinishCommandBeep();
@@ -1114,11 +1345,12 @@ void SetB(int speed, float fwdCm, char dir) {
     snprintf(s_compoundMain, sizeof(s_compoundMain), "SetB(%d,%.0f,'%c');", speed, fwdCm, dir);
     SetBack_Yaw(speed);
     if (fwdCm > 0.0f) {
-        FC(speed, fwdCm, true);
+        int maxSpd = constrain(abs(speed), 15, max_speed_enc);
+        int minSpd = min(min_speed_enc, maxSpd);
+        baseMoveEncInternal(minSpd, maxSpd, fwdCm, 0, 0, fwdKp, fwdKd, true, true, "FFE", 1);
         delay(10);
     }
-    if (dir == 'L' || dir == 'l')      SpinDegree(-90.0f);
-    else if (dir == 'R' || dir == 'r') SpinDegree(90.0f);
+    execSpinSelect(dir);
     s_inCompoundCmd = false;
     missionFinishCommandBeep();
 }

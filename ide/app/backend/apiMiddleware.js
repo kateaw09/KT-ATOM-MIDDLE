@@ -33,6 +33,7 @@ const EDITABLE_FILES = [
 const CONFIG_SCHEMA = [
   { key: 'enableMultiMode', type: 'bool' },
   { key: 'currentRunMode', type: 'int' },
+  { key: 'useCodeMotionDefaults', type: 'bool' },
   { key: 'forceOverwriteFlashFromCode', type: 'bool' },
   { key: 'fwdKp', type: 'float' },
   { key: 'fwdKd', type: 'float' },
@@ -42,6 +43,8 @@ const CONFIG_SCHEMA = [
   { key: 'kd_turn', type: 'float' },
   { key: 'Set_kp', type: 'float' },
   { key: 'Set_kd', type: 'float' },
+  { key: 'kp_time', type: 'float' },
+  { key: 'kd_time', type: 'float' },
   { key: 'spinKp', type: 'float' },
   { key: 'spinKd', type: 'float' },
   { key: 'spinMinSpeed', type: 'int' },
@@ -79,11 +82,16 @@ const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.txt': 'text/plain; charset=utf-8',
+  '.woff2': 'font/woff2',
   '.bin': 'application/octet-stream'
 };
 
@@ -153,6 +161,10 @@ const SKETCH_DIR = findSketchDir();
 const LIBRARIES_DIR = findLibrariesDir(SKETCH_DIR);
 let ARDUINO_CLI = findArduinoCli();
 const VERSIONS_DIR = path.join(SKETCH_DIR, '.kt-versions');
+const PLUGINS_DIR = path.join(SKETCH_DIR, 'extentions-plugins');
+const PLUGINS_CONFIG_FILE = path.join(SKETCH_DIR, '.kt-plugins.json');
+const PLUGIN_SDK_ROOT = path.join(IDE_DIR, 'src');
+const ALLOWED_SDK_SUBDIRS = new Set(['sim', 'blocks']);
 
 function getArduinoCli() {
   if (!ARDUINO_CLI || (ARDUINO_CLI !== 'arduino-cli' && !fs.existsSync(ARDUINO_CLI))) {
@@ -241,6 +253,20 @@ function applyConfigPatch(content, patch) {
   return updated;
 }
 
+function parseSetupCodeDefaults(mainInoContent) {
+  if (!mainInoContent) return null;
+  if (/^\s*enableCodeMotionDefaults\s*\(\s*\)\s*;/m.test(mainInoContent)) return true;
+  if (/^\s*\/\/\s*enableCodeMotionDefaults\s*\(\s*\)\s*;/m.test(mainInoContent)) return false;
+  return null;
+}
+
+function applySetupCodeDefaultsPatch(mainInoContent, enabled) {
+  if (!mainInoContent) return mainInoContent;
+  const re = /^([ \t]*)(?:\/\/[ \t]*)?(enableCodeMotionDefaults\s*\(\s*\)\s*;)/m;
+  if (!re.test(mainInoContent)) return mainInoContent;
+  return mainInoContent.replace(re, enabled ? '$1$2' : '$1// $2');
+}
+
 function readAllSketchFiles() {
   const files = {};
   for (const name of EDITABLE_FILES) {
@@ -250,6 +276,10 @@ function readAllSketchFiles() {
     }
   }
   const config = files['Config.ino'] ? parseConfigIno(files['Config.ino']) : {};
+  if (files[MAIN_SKETCH_FILE]) {
+    const setupFlag = parseSetupCodeDefaults(files[MAIN_SKETCH_FILE]);
+    if (setupFlag !== null) config.useCodeMotionDefaults = setupFlag;
+  }
   return { files, config };
 }
 
@@ -268,6 +298,16 @@ function saveSketchUpdates(payload) {
       const current = fs.readFileSync(cfgPath, 'utf8');
       const patched = applyConfigPatch(current, payload.configPatch);
       fs.writeFileSync(cfgPath, patched, 'utf8');
+    }
+    if ('useCodeMotionDefaults' in payload.configPatch) {
+      const mainPath = path.join(SKETCH_DIR, MAIN_SKETCH_FILE);
+      if (fs.existsSync(mainPath)) {
+        const currentMain = fs.readFileSync(mainPath, 'utf8');
+        const patchedMain = applySetupCodeDefaultsPatch(currentMain, !!payload.configPatch.useCodeMotionDefaults);
+        if (patchedMain !== currentMain) {
+          fs.writeFileSync(mainPath, patchedMain, 'utf8');
+        }
+      }
     }
   }
 }
@@ -1374,11 +1414,271 @@ function deleteVersion(id) {
 
 let compileBusy = false;
 
+// ============================================================================
+// Extension Plugins Registry, Static Host, Shared SDK & Live Bridge
+// ============================================================================
+function isSafePluginId(id) {
+  return typeof id === 'string' && /^[a-zA-Z0-9._-]{1,64}$/.test(id) && id !== '.' && id !== '..';
+}
+
+function readPluginStore() {
+  const fallback = {
+    connectedIds: [],
+    primaryPluginId: null,
+    bridgeState: null,
+    updatedAt: null
+  };
+  try {
+    if (!fs.existsSync(PLUGINS_CONFIG_FILE)) return fallback;
+    const raw = JSON.parse(fs.readFileSync(PLUGINS_CONFIG_FILE, 'utf8'));
+    if (!raw || typeof raw !== 'object') return fallback;
+    const connectedIds = Array.isArray(raw.connectedIds)
+      ? raw.connectedIds.filter((id) => isSafePluginId(id))
+      : [];
+    const primaryPluginId = isSafePluginId(raw.primaryPluginId) && connectedIds.includes(raw.primaryPluginId)
+      ? raw.primaryPluginId
+      : (connectedIds[0] || null);
+    return {
+      connectedIds,
+      primaryPluginId,
+      bridgeState: raw.bridgeState && typeof raw.bridgeState === 'object' ? raw.bridgeState : null,
+      updatedAt: raw.updatedAt || null
+    };
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function writePluginStore(nextStore) {
+  const safeStore = {
+    connectedIds: Array.isArray(nextStore.connectedIds) ? nextStore.connectedIds.filter(isSafePluginId) : [],
+    primaryPluginId: isSafePluginId(nextStore.primaryPluginId) ? nextStore.primaryPluginId : null,
+    bridgeState: nextStore.bridgeState && typeof nextStore.bridgeState === 'object' ? nextStore.bridgeState : null,
+    updatedAt: new Date().toISOString()
+  };
+  if (safeStore.primaryPluginId && !safeStore.connectedIds.includes(safeStore.primaryPluginId)) {
+    safeStore.primaryPluginId = safeStore.connectedIds[0] || null;
+  }
+  const dir = path.dirname(PLUGINS_CONFIG_FILE);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmpFile = `${PLUGINS_CONFIG_FILE}.tmp.${process.pid}`;
+  fs.writeFileSync(tmpFile, JSON.stringify(safeStore, null, 2), 'utf8');
+  fs.renameSync(tmpFile, PLUGINS_CONFIG_FILE);
+  return safeStore;
+}
+
+function discoverPlugins() {
+  fs.mkdirSync(PLUGINS_DIR, { recursive: true });
+  const store = readPluginStore();
+  const entries = fs.readdirSync(PLUGINS_DIR, { withFileTypes: true });
+  const plugins = [];
+
+  for (const ent of entries) {
+    if (!ent.isDirectory() || ent.name.startsWith('.')) continue;
+    const folderName = ent.name;
+    if (!isSafePluginId(folderName)) continue;
+
+    const pluginDir = path.join(PLUGINS_DIR, folderName);
+    const manifestPath = path.join(pluginDir, 'plugin.json');
+    let manifest = {};
+    let hasManifest = false;
+
+    if (fs.existsSync(manifestPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        if (parsed && typeof parsed === 'object') {
+          manifest = parsed;
+          hasManifest = true;
+        }
+      } catch (_) {}
+    }
+
+    const id = folderName;
+    const rawEntry = typeof manifest.entry === 'string' && manifest.entry.trim()
+      ? manifest.entry.trim().replace(/^\/+/, '')
+      : 'index.html';
+    const safeEntry = path.normalize(rawEntry).replace(/\\/g, '/');
+    const resolvedEntry = path.resolve(pluginDir, safeEntry);
+    const insidePlugin = resolvedEntry.startsWith(path.resolve(pluginDir) + path.sep);
+    const entryExists = insidePlugin && fs.existsSync(resolvedEntry) && fs.statSync(resolvedEntry).isFile();
+
+    if (!hasManifest && !entryExists) continue;
+
+    const connected = store.connectedIds.includes(id);
+    const isPrimary = connected && store.primaryPluginId === id;
+
+    plugins.push({
+      id,
+      manifestId: isSafePluginId(manifest.id) ? manifest.id : id,
+      name: String(manifest.name || folderName),
+      shortName: String(manifest.shortName || manifest.name || folderName),
+      version: String(manifest.version || '1.0.0'),
+      description: String(manifest.description || (hasManifest ? '' : 'พบโฟลเดอร์แอปเสริม (ยังไม่มีไฟล์ plugin.json — พร้อมทดลองเชื่อมต่อ)')),
+      entry: insidePlugin ? safeEntry : 'index.html',
+      entryExists,
+      hasManifest,
+      icon: String(manifest.icon || 'plug'),
+      badgeColor: /^#[0-9a-fA-F]{3,8}$/.test(String(manifest.badgeColor || '')) ? manifest.badgeColor : '#0072f5',
+      capabilities: Array.isArray(manifest.capabilities) ? manifest.capabilities.map((c) => String(c)) : [],
+      author: String(manifest.author || ''),
+      offline: manifest.offline !== false,
+      folderPath: pluginDir,
+      connected,
+      isPrimary,
+      launchUrl: `/plugins/${encodeURIComponent(id)}/`
+    });
+  }
+
+  plugins.sort((a, b) => {
+    if (a.connected !== b.connected) return a.connected ? -1 : 1;
+    if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return { store, plugins };
+}
+
+let liveBridgeState = readPluginStore().bridgeState || {
+  seq: 0,
+  updatedAt: null,
+  updatedBy: null,
+  activeMissionFile: 'RunMode1.ino',
+  fieldMap: null,
+  simPose: null,
+  calibration: null,
+  config: null
+};
+
+function mergeBridgeState(patch) {
+  if (!patch || typeof patch !== 'object') return liveBridgeState;
+  const src = patch.snapshot && typeof patch.snapshot === 'object' ? patch.snapshot : patch;
+  const next = {
+    ...liveBridgeState,
+    seq: (Number(liveBridgeState?.seq) || 0) + 1,
+    updatedAt: new Date().toISOString(),
+    updatedBy: String(src.source || src.updatedBy || patch.updatedBy || 'unknown')
+  };
+  if (typeof src.activeMissionFile === 'string' && src.activeMissionFile) {
+    next.activeMissionFile = src.activeMissionFile;
+  }
+  if (src.fieldMap && typeof src.fieldMap === 'object') {
+    next.fieldMap = { ...(liveBridgeState.fieldMap || {}), ...src.fieldMap };
+  }
+  if (src.simPose && typeof src.simPose === 'object') {
+    next.simPose = { ...(liveBridgeState.simPose || {}), ...src.simPose };
+  }
+  if (src.calibration && typeof src.calibration === 'object') {
+    next.calibration = { ...(liveBridgeState.calibration || {}), ...src.calibration };
+  }
+  if (src.config && typeof src.config === 'object') {
+    next.config = { ...(liveBridgeState.config || {}), ...src.config };
+  }
+  liveBridgeState = next;
+  try {
+    const store = readPluginStore();
+    store.bridgeState = liveBridgeState;
+    writePluginStore(store);
+  } catch (_) {}
+  return liveBridgeState;
+}
+
+function serveStaticFile(res, fullPath, forcedMime = null) {
+  if (!fullPath || !fs.existsSync(fullPath) || fs.statSync(fullPath).isDirectory()) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Not Found');
+    return true;
+  }
+  const ext = path.extname(fullPath).toLowerCase();
+  const stat = fs.statSync(fullPath);
+  res.writeHead(200, {
+    'Content-Type': forcedMime || MIME_TYPES[ext] || 'application/octet-stream',
+    'Content-Length': stat.size,
+    'Cache-Control': 'no-store'
+  });
+  fs.createReadStream(fullPath).pipe(res);
+  return true;
+}
+
 function createApiMiddleware() {
   return async (req, res, next) => {
     try {
+      const rawUrlPath = String(req.url || '/').split('?')[0];
+      if (
+        (rawUrlPath.startsWith('/plugins/') || rawUrlPath.startsWith('/plugin-sdk/')) &&
+        /(^|[\\/])(\.\.|%2e%2e)([\\/]|$)/i.test(rawUrlPath)
+      ) {
+        res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('Forbidden');
+      }
       const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const pathname = decodeURIComponent(parsedUrl.pathname);
+
+      // Shared Offline ES Modules SDK (/plugin-sdk/sim/* and /plugin-sdk/blocks/*)
+      if ((req.method === 'GET' || req.method === 'HEAD') && pathname.startsWith('/plugin-sdk/')) {
+        const rawRel = pathname.slice('/plugin-sdk/'.length).replace(/\\/g, '/');
+        if (!rawRel || rawRel.includes('..') || rawRel.startsWith('/')) {
+          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end('Forbidden');
+        }
+        const normRel = path.posix.normalize(rawRel);
+        const topDir = normRel.split('/')[0];
+        if (!ALLOWED_SDK_SUBDIRS.has(topDir) || !/\.(m?js)$/i.test(normRel)) {
+          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end('Forbidden SDK Path');
+        }
+        const sdkRootResolved = path.resolve(PLUGIN_SDK_ROOT);
+        const targetFile = path.resolve(sdkRootResolved, normRel);
+        if (!targetFile.startsWith(sdkRootResolved + path.sep)) {
+          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end('Forbidden');
+        }
+        return serveStaticFile(res, targetFile, 'application/javascript; charset=utf-8');
+      }
+
+      // Extension Plugins Static Host (/plugins/:pluginId/*)
+      const pluginMatch = pathname.match(/^\/plugins\/([^/]+)(\/.*)?$/);
+      if ((req.method === 'GET' || req.method === 'HEAD') && pluginMatch) {
+        const pluginId = pluginMatch[1];
+        const tail = pluginMatch[2] || '';
+        if (!isSafePluginId(pluginId)) {
+          res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end('Invalid plugin ID');
+        }
+        if (!tail) {
+          res.writeHead(302, { Location: `/plugins/${encodeURIComponent(pluginId)}/${parsedUrl.search || ''}` });
+          return res.end();
+        }
+        const pluginRoot = path.resolve(PLUGINS_DIR, pluginId);
+        if (!pluginRoot.startsWith(path.resolve(PLUGINS_DIR) + path.sep) || !fs.existsSync(pluginRoot) || !fs.statSync(pluginRoot).isDirectory()) {
+          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end('Plugin not found');
+        }
+
+        let relPath = tail.replace(/^\/+/, '');
+        if (!relPath) {
+          let entry = 'index.html';
+          const manifestPath = path.join(pluginRoot, 'plugin.json');
+          if (fs.existsSync(manifestPath)) {
+            try {
+              const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+              if (parsed && typeof parsed.entry === 'string' && parsed.entry.trim()) {
+                entry = parsed.entry.trim().replace(/^\/+/, '');
+              }
+            } catch (_) {}
+          }
+          relPath = entry;
+        }
+        if (relPath.includes('..')) {
+          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end('Forbidden');
+        }
+        const resolvedFile = path.resolve(pluginRoot, relPath);
+        if (!resolvedFile.startsWith(pluginRoot + path.sep)) {
+          res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end('Forbidden');
+        }
+        return serveStaticFile(res, resolvedFile);
+      }
 
       if (!pathname.startsWith('/api/')) {
         return next();
@@ -1396,10 +1696,91 @@ function createApiMiddleware() {
           librariesDir: LIBRARIES_DIR,
           buildDir: BUILD_DIR,
           versionsDir: VERSIONS_DIR,
+          pluginsDir: PLUGINS_DIR,
+          offlineReady: true,
           runtime: `Vite + Node.js ${process.version}`,
           platform: process.platform,
           editableFiles: EDITABLE_FILES.filter((f) => fs.existsSync(path.join(SKETCH_DIR, f))),
           artifacts: listBuildArtifacts()
+        });
+      }
+
+      if (req.method === 'GET' && pathname === '/api/plugins') {
+        const { store, plugins } = discoverPlugins();
+        return sendJson(res, 200, {
+          ok: true,
+          pluginsDir: PLUGINS_DIR,
+          connectedIds: store.connectedIds,
+          primaryPluginId: store.primaryPluginId,
+          plugins
+        });
+      }
+
+      if (req.method === 'POST' && pathname === '/api/plugins/connect') {
+        const body = await readJsonBody(req);
+        const action = String(body.action || 'connect');
+        const pluginId = String(body.pluginId || '').trim();
+        if (!isSafePluginId(pluginId)) {
+          return sendJson(res, 400, { ok: false, error: 'รหัสแอปเสริมไม่ถูกต้อง' });
+        }
+
+        const before = discoverPlugins();
+        const exists = before.plugins.some((p) => p.id === pluginId);
+        if ((action === 'connect' || action === 'setPrimary') && !exists) {
+          return sendJson(res, 404, { ok: false, error: `ไม่พบแอปเสริม "${pluginId}" ในโฟลเดอร์ extentions-plugins` });
+        }
+
+        const nextStore = { ...before.store };
+        const set = new Set(nextStore.connectedIds);
+
+        if (action === 'connect') {
+          set.add(pluginId);
+          nextStore.connectedIds = Array.from(set);
+          if (!nextStore.primaryPluginId || body.setPrimary) {
+            nextStore.primaryPluginId = pluginId;
+          }
+        } else if (action === 'disconnect') {
+          set.delete(pluginId);
+          nextStore.connectedIds = Array.from(set);
+          if (nextStore.primaryPluginId === pluginId) {
+            nextStore.primaryPluginId = nextStore.connectedIds[0] || null;
+          }
+        } else if (action === 'setPrimary') {
+          set.add(pluginId);
+          nextStore.connectedIds = Array.from(set);
+          nextStore.primaryPluginId = pluginId;
+        } else {
+          return sendJson(res, 400, { ok: false, error: `ไม่รองรับ action: ${action}` });
+        }
+
+        writePluginStore(nextStore);
+        const after = discoverPlugins();
+        return sendJson(res, 200, {
+          ok: true,
+          pluginsDir: PLUGINS_DIR,
+          connectedIds: after.store.connectedIds,
+          primaryPluginId: after.store.primaryPluginId,
+          plugins: after.plugins
+        });
+      }
+
+      if (req.method === 'GET' && pathname === '/api/plugin-bridge/state') {
+        return sendJson(res, 200, {
+          ok: true,
+          bridge: liveBridgeState,
+          filesMeta: {
+            activeSketchDir: SKETCH_DIR,
+            editableFiles: EDITABLE_FILES.filter((f) => fs.existsSync(path.join(SKETCH_DIR, f)))
+          }
+        });
+      }
+
+      if (req.method === 'POST' && pathname === '/api/plugin-bridge/state') {
+        const body = await readJsonBody(req);
+        const updated = mergeBridgeState(body);
+        return sendJson(res, 200, {
+          ok: true,
+          bridge: updated
         });
       }
 
@@ -1657,6 +2038,7 @@ module.exports = {
   LIBRARIES_DIR,
   ARDUINO_CLI,
   VERSIONS_DIR,
+  PLUGINS_DIR,
   MIME_TYPES,
   createApiMiddleware
 };

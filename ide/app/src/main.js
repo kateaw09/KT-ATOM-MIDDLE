@@ -20,6 +20,7 @@ import {
   buildCommandDefs,
   MISSION_SECTIONS,
   getMissionSectionFnName,
+  DEFAULT_MOTION_CONFIG,
   CONFIG_SECTIONS,
   CONFIG_FIELDS,
   SNIPPETS
@@ -49,6 +50,10 @@ function escapeHtml(s) {
     '"': '&quot;',
     "'": '&#39;'
   })[c]);
+}
+
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function svgIcon(name, sizeClass = '') {
@@ -108,6 +113,9 @@ function ensureMissionStructure(m) {
   delete m.blocks;
   if (!m.activeSection || !m.sections[m.activeSection]) m.activeSection = 'Box1';
   if (!m.foldedSections || typeof m.foldedSections !== 'object') m.foldedSections = {};
+  if (!m.disabledSections || typeof m.disabledSections !== 'object') m.disabledSections = {};
+  if (typeof m.extraFunctionsCode !== 'string') m.extraFunctionsCode = '';
+  if (!m.extraFunctionsBlocks || typeof m.extraFunctionsBlocks !== 'object') m.extraFunctionsBlocks = {};
   return m;
 }
 
@@ -115,6 +123,15 @@ function getMissionTotalCount(m) {
   if (!m) return 0;
   ensureMissionStructure(m);
   return MISSION_SECTIONS.reduce((sum, sec) => sum + (m.sections[sec.id]?.length || 0), 0);
+}
+
+function getMissionActiveCount(m) {
+  if (!m) return 0;
+  ensureMissionStructure(m);
+  return MISSION_SECTIONS.reduce((sum, sec) => {
+    if (m.disabledSections?.[sec.id]) return sum;
+    return sum + (m.sections[sec.id] || []).filter((b) => !b?.disabled).length;
+  }, 0);
 }
 
 // ============================================================================
@@ -162,9 +179,9 @@ const state = {
     tbmax: 80
   },
   missions: {
-    'RunMode1.ino': { placed: true, x: 28, y: 28, folded: false, activeSection: 'Box1', foldedSections: {}, sections: createEmptyMissionSections() },
-    'RunMode2.ino': { placed: true, x: 528, y: 28, folded: false, activeSection: 'Box1', foldedSections: {}, sections: createEmptyMissionSections() },
-    'RunMode3.ino': { placed: false, x: 1028, y: 28, folded: false, activeSection: 'Box1', foldedSections: {}, sections: createEmptyMissionSections() }
+    'RunMode1.ino': { placed: true, x: 28, y: 28, folded: false, activeSection: 'Box1', foldedSections: {}, disabledSections: {}, sections: createEmptyMissionSections() },
+    'RunMode2.ino': { placed: true, x: 528, y: 28, folded: false, activeSection: 'Box1', foldedSections: {}, disabledSections: {}, sections: createEmptyMissionSections() },
+    'RunMode3.ino': { placed: false, x: 1028, y: 28, folded: false, activeSection: 'Box1', foldedSections: {}, disabledSections: {}, sections: createEmptyMissionSections() }
   },
   looseBlocks: [],
   nextLooseZ: 30,
@@ -210,6 +227,12 @@ const state = {
     simViewMode: '2d',
     simCameraRot: 0,
     showMarkers: false
+  },
+  plugins: {
+    list: [],
+    connectedIds: [],
+    primaryPluginId: null,
+    pluginsDir: ''
   },
   serialPort: null,
   serialReader: null,
@@ -362,20 +385,20 @@ function syncCalibrationFromConfig(forceReset = false) {
     smin: Array.isArray(cfg.senMin) ? cfg.senMin : state.calibration.smin,
     smax: Array.isArray(cfg.senMax) ? cfg.senMax : state.calibration.smax,
     sthr: Array.isArray(cfg.senThresh) ? cfg.senThresh : state.calibration.sthr,
-    spinkp: Number.isFinite(cfg.spinKp) ? cfg.spinKp : 0.9,
-    spinkd: Number.isFinite(cfg.spinKd) ? cfg.spinKd : 0.65,
-    tfkp: Number.isFinite(cfg.turnFrontKp) ? cfg.turnFrontKp : 1.4,
-    tfkd: Number.isFinite(cfg.turnFrontKd) ? cfg.turnFrontKd : 0.55,
-    tbkp: Number.isFinite(cfg.turnBackKp) ? cfg.turnBackKp : 1.4,
-    tbkd: Number.isFinite(cfg.turnBackKd) ? cfg.turnBackKd : 0.55,
-    tspin: Number.isFinite(cfg.threshold_spinDegree) ? cfg.threshold_spinDegree : 2.5,
-    slofs: Number.isFinite(cfg.spinLeftOffsetDeg) ? cfg.spinLeftOffsetDeg : 0.0,
-    tturn: Number.isFinite(cfg.smallAngle_turnDegree) ? cfg.smallAngle_turnDegree : 4.0,
-    trofs: Number.isFinite(cfg.turnRightOffsetDeg) ? cfg.turnRightOffsetDeg : 0.0,
-    sathr: Number.isFinite(cfg.smallAngle_threshold) ? cfg.smallAngle_threshold : 55.0,
-    smaxs: Number.isFinite(cfg.spinMaxSpeed) ? cfg.spinMaxSpeed : 85,
-    tfmax: Number.isFinite(cfg.turnFrontMaxSpeed) ? cfg.turnFrontMaxSpeed : 80,
-    tbmax: Number.isFinite(cfg.turnBackMaxSpeed) ? cfg.turnBackMaxSpeed : 80
+    spinkp: Number.isFinite(cfg.spinKp) ? cfg.spinKp : DEFAULT_MOTION_CONFIG.spinKp,
+    spinkd: Number.isFinite(cfg.spinKd) ? cfg.spinKd : DEFAULT_MOTION_CONFIG.spinKd,
+    tfkp: Number.isFinite(cfg.turnFrontKp) ? cfg.turnFrontKp : DEFAULT_MOTION_CONFIG.turnFrontKp,
+    tfkd: Number.isFinite(cfg.turnFrontKd) ? cfg.turnFrontKd : DEFAULT_MOTION_CONFIG.turnFrontKd,
+    tbkp: Number.isFinite(cfg.turnBackKp) ? cfg.turnBackKp : DEFAULT_MOTION_CONFIG.turnBackKp,
+    tbkd: Number.isFinite(cfg.turnBackKd) ? cfg.turnBackKd : DEFAULT_MOTION_CONFIG.turnBackKd,
+    tspin: Number.isFinite(cfg.threshold_spinDegree) ? cfg.threshold_spinDegree : DEFAULT_MOTION_CONFIG.threshold_spinDegree,
+    slofs: Number.isFinite(cfg.spinLeftOffsetDeg) ? cfg.spinLeftOffsetDeg : DEFAULT_MOTION_CONFIG.spinLeftOffsetDeg,
+    tturn: Number.isFinite(cfg.smallAngle_turnDegree) ? cfg.smallAngle_turnDegree : DEFAULT_MOTION_CONFIG.smallAngle_turnDegree,
+    trofs: Number.isFinite(cfg.turnRightOffsetDeg) ? cfg.turnRightOffsetDeg : DEFAULT_MOTION_CONFIG.turnRightOffsetDeg,
+    sathr: Number.isFinite(cfg.smallAngle_threshold) ? cfg.smallAngle_threshold : DEFAULT_MOTION_CONFIG.smallAngle_threshold,
+    smaxs: Number.isFinite(cfg.spinMaxSpeed) ? cfg.spinMaxSpeed : DEFAULT_MOTION_CONFIG.spinMaxSpeed,
+    tfmax: Number.isFinite(cfg.turnFrontMaxSpeed) ? cfg.turnFrontMaxSpeed : DEFAULT_MOTION_CONFIG.turnFrontMaxSpeed,
+    tbmax: Number.isFinite(cfg.turnBackMaxSpeed) ? cfg.turnBackMaxSpeed : DEFAULT_MOTION_CONFIG.turnBackMaxSpeed
   };
   renderCalibrationCard();
 }
@@ -420,6 +443,7 @@ function applyLiveCalibration(calObj, sourceLabel) {
 
   const syncedConfig = {
     ...(state.config || {}),
+    ...(calObj.cdef !== undefined ? { useCodeMotionDefaults: !!calObj.cdef } : {}),
     ticksPerCm: next.tpcm,
     distTuneMm: next.distmm,
     calRun30cmMs: next.calms,
@@ -466,6 +490,7 @@ function applyLiveCalibration(calObj, sourceLabel) {
 
   renderCalibrationCard();
   rebuildSimAndDraw(true);
+  if (typeof publishPluginBridgeState === 'function') publishPluginBridgeState('calibration');
 }
 
 function renderCalibrationCard() {
@@ -487,20 +512,26 @@ function renderCalibrationCard() {
     $('calValTrim').textContent = `${tr > 0 ? '+' : ''}${tr}`;
   }
   if ($('calValThresholds')) {
-    $('calValThresholds').textContent = `${(Number(cal.tspin) || 3.5).toFixed(1)}° / ${(Number(cal.tturn) || 5.0).toFixed(1)}°`;
+    const tspin = Number.isFinite(Number(cal.tspin)) ? Number(cal.tspin) : DEFAULT_MOTION_CONFIG.threshold_spinDegree;
+    const tturn = Number.isFinite(Number(cal.tturn)) ? Number(cal.tturn) : DEFAULT_MOTION_CONFIG.smallAngle_turnDegree;
+    $('calValThresholds').textContent = `${tspin.toFixed(1)}° / ${tturn.toFixed(1)}°`;
   }
   if ($('calValSpinPd')) {
-    $('calValSpinPd').textContent = `${(Number(cal.spinkp) || 1.2).toFixed(2)} / ${(Number(cal.spinkd) || 0.15).toFixed(2)}`;
+    const skp = Number.isFinite(Number(cal.spinkp)) ? Number(cal.spinkp) : DEFAULT_MOTION_CONFIG.spinKp;
+    const skd = Number.isFinite(Number(cal.spinkd)) ? Number(cal.spinkd) : DEFAULT_MOTION_CONFIG.spinKd;
+    $('calValSpinPd').textContent = `${skp.toFixed(2)} / ${skd.toFixed(2)}`;
   }
   if ($('calValTurnPd')) {
-    $('calValTurnPd').textContent = `${(Number(cal.tfkp) || 2.0).toFixed(2)} / ${(Number(cal.tfkd) || 0.1).toFixed(2)}`;
+    const tfkp = Number.isFinite(Number(cal.tfkp)) ? Number(cal.tfkp) : DEFAULT_MOTION_CONFIG.turnFrontKp;
+    const tfkd = Number.isFinite(Number(cal.tfkd)) ? Number(cal.tfkd) : DEFAULT_MOTION_CONFIG.turnFrontKd;
+    $('calValTurnPd').textContent = `${tfkp.toFixed(2)} / ${tfkd.toFixed(2)}`;
   }
   if ($('calValLineThr')) {
     const st = Array.isArray(cal.sthr) ? cal.sthr : [320, 320, 320, 320];
     $('calValLineThr').textContent = st.join(', ');
   }
   if ($('simCalSummaryText')) {
-    $('simCalSummaryText').textContent = `Cal (${cal.source}): ${(Number(cal.tpcm) || 15).toFixed(1)} t/cm · ${Math.round(cal.calms || 1150)}ms/30cm (${cmps} cm/s)`;
+    $('simCalSummaryText').textContent = `Cal (${cal.source}): ${(Number(cal.tpcm) || 125.4).toFixed(1)} t/cm · ${Math.round(cal.calms || 1150)}ms/30cm (${cmps} cm/s)`;
   }
 }
 
@@ -612,6 +643,7 @@ function extractTopLevelVoidFunctionsWithLines(code) {
           if (depth === 0) {
             funcs[fnName] = {
               body: text.slice(bodyStart, i),
+              fullText: text.slice(match.index, i + 1),
               fnStartLine,
               bodyStartLine,
               fnEndLine: countNewlinesBefore(text, i) + 1
@@ -660,8 +692,11 @@ function buildMissionLineIndex(filename, code) {
     let lastBlockIdx = -1;
     for (let i = 0; i < bodyLines.length; i++) {
       const trimmed = bodyLines[i].trim();
-      if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('extern ')) continue;
-      if (skipSectionCalls && /^(?:M[23]_)?(?:Box[1-4]|EndMission|Endmission)\s*\(\s*\)\s*;?$/i.test(trimmed)) {
+      if (!trimmed || trimmed.startsWith('extern ')) continue;
+      if (trimmed.startsWith('//')) {
+        const disabledBlk = parseDisabledCommentLine(trimmed, skipSectionCalls);
+        if (!disabledBlk) continue;
+      } else if (skipSectionCalls && /^(?:M[23]_)?(?:Box[1-4]|EndMission|Endmission)\s*\(\s*\)\s*;?$/i.test(trimmed)) {
         continue;
       }
       const lineNum = fnInfo.bodyStartLine + i;
@@ -691,7 +726,7 @@ function buildMissionLineIndex(filename, code) {
       );
       const mainLines = String(mainInfo.body || '').split(/\r?\n/);
       for (let i = 0; i < mainLines.length; i++) {
-        const m = mainLines[i].trim().match(/^([A-Za-z_]\w*)\s*\(\s*\)\s*;?$/);
+        const m = mainLines[i].trim().match(/^(?:\/\/\s*(?:\[OFF\]\s*)?)?([A-Za-z_]\w*)\s*\(\s*\)\s*;?/);
         if (m && callNames[m[1].toLowerCase()]) {
           mainCallLineToSection.set(mainInfo.bodyStartLine + i, callNames[m[1].toLowerCase()]);
         }
@@ -872,11 +907,43 @@ function parseLineToBlock(line) {
   return { type: 'RAW', params: { raw: line } };
 }
 
+function parseDisabledCommentLine(trimmed, skipSectionCalls = false) {
+  if (!trimmed || !trimmed.startsWith('//')) return null;
+  let body = trimmed.replace(/^\/\/+\s*/, '').trim();
+  if (!body) return null;
+
+  const hasOffTag = /^\[OFF\]\s*/i.test(body);
+  if (hasOffTag) {
+    body = body.replace(/^\[OFF\]\s*/i, '').trim();
+    if (!body) return null;
+  }
+
+  if (skipSectionCalls && /^(?:M[23]_)?(?:Box[1-4]|EndMission|Endmission)\s*\(\s*\)\s*;?/i.test(body)) {
+    return null;
+  }
+
+  const parsed = parseLineToBlock(body);
+  if (parsed.type !== 'RAW') {
+    return { ...parsed, disabled: true };
+  }
+  if (hasOffTag || /^[A-Za-z_]\w*\s*\([^;]*\)\s*;(?:\s*\/\/.*)?$/.test(body)) {
+    return { ...parsed, disabled: true };
+  }
+  return null;
+}
+
 function parseBodyLinesToBlocks(bodyText, skipSectionCalls = false) {
   const blocks = [];
   for (const rawLine of String(bodyText || '').split(/\r?\n/)) {
     const trimmed = rawLine.trim();
-    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('extern ')) continue;
+    if (!trimmed || trimmed.startsWith('extern ')) continue;
+    if (trimmed.startsWith('//')) {
+      const disabledBlk = parseDisabledCommentLine(trimmed, skipSectionCalls);
+      if (disabledBlk) {
+        blocks.push({ id: state.nextBlockId++, ...disabledBlk });
+      }
+      continue;
+    }
     if (skipSectionCalls && /^(?:M[23]_)?(?:Box[1-4]|EndMission|Endmission)\s*\(\s*\)\s*;?$/i.test(trimmed)) {
       continue;
     }
@@ -888,10 +955,22 @@ function parseBodyLinesToBlocks(bodyText, skipSectionCalls = false) {
 function parseMissionFile(filename) {
   const code = state.files[filename] || '';
   const modeNum = filename.match(/RunMode(\d)/)?.[1] || '1';
-  const funcs = extractTopLevelVoidFunctions(code);
+  const funcsWithLines = extractTopLevelVoidFunctionsWithLines(code);
   const funcMapLower = {};
-  for (const [k, v] of Object.entries(funcs)) {
-    funcMapLower[k.toLowerCase()] = v;
+  for (const [k, v] of Object.entries(funcsWithLines)) {
+    funcMapLower[k.toLowerCase()] = v.body;
+  }
+
+  const standardFnNames = new Set([
+    `runmode${modeNum}`,
+    ...MISSION_SECTIONS.map((sec) => getMissionSectionFnName(filename, sec.id).toLowerCase())
+  ]);
+  const extraFnTexts = [];
+  const extraFnBlocks = {};
+  for (const [k, v] of Object.entries(funcsWithLines)) {
+    if (standardFnNames.has(k.toLowerCase())) continue;
+    extraFnTexts.push(v.fullText || `void ${k}() {\n${v.body}\n}`);
+    extraFnBlocks[k] = parseBodyLinesToBlocks(v.body, false);
   }
 
   const hasStructuredSections = MISSION_SECTIONS.some((sec) => {
@@ -900,11 +979,22 @@ function parseMissionFile(filename) {
   });
 
   const sections = createEmptyMissionSections();
+  const disabledSections = {};
   if (hasStructuredSections) {
+    const runBodyLines = String(funcMapLower[`runmode${modeNum}`] || '').split(/\r?\n/).map((l) => l.trim());
     for (const sec of MISSION_SECTIONS) {
       const targetFn = getMissionSectionFnName(filename, sec.id);
       const body = funcMapLower[targetFn.toLowerCase()] ?? '';
       sections[sec.id] = parseBodyLinesToBlocks(body, false);
+
+      const escapedFn = escapeRegExp(targetFn);
+      const activeRe = new RegExp(`^${escapedFn}\\s*\\(\\s*\\)\\s*;`, 'i');
+      const commentedRe = new RegExp(`^//\\s*(?:\\[OFF\\]\\s*)?${escapedFn}\\s*\\(\\s*\\)\\s*;`, 'i');
+      const hasActiveCall = runBodyLines.some((l) => activeRe.test(l));
+      const hasCommentedCall = runBodyLines.some((l) => commentedRe.test(l));
+      if (hasCommentedCall && !hasActiveCall) {
+        disabledSections[sec.id] = true;
+      }
     }
   } else {
     const runBody = funcMapLower[`runmode${modeNum}`] ?? code;
@@ -912,7 +1002,12 @@ function parseMissionFile(filename) {
   }
 
   const m = ensureMissionStructure(state.missions[filename]);
-  if (m) m.sections = sections;
+  if (m) {
+    m.sections = sections;
+    m.disabledSections = disabledSections;
+    m.extraFunctionsCode = extraFnTexts.join('\n\n');
+    m.extraFunctionsBlocks = extraFnBlocks;
+  }
 }
 
 function parseAllMissionsFromFiles() {
@@ -923,11 +1018,21 @@ function parseAllMissionsFromFiles() {
 function blocksToMissionCode(filename, missionOrSections) {
   const modeNum = filename.match(/RunMode(\d)/)?.[1] || '1';
   const externLines = state.variables.map((v) => `extern ${v.type} ${v.name};`);
-  const sections = missionOrSections && typeof missionOrSections === 'object' && !Array.isArray(missionOrSections)
+  const isMissionObj = missionOrSections && typeof missionOrSections === 'object' && !Array.isArray(missionOrSections);
+  const sections = isMissionObj
     ? (missionOrSections.sections || missionOrSections)
     : { ...createEmptyMissionSections(), Box1: Array.isArray(missionOrSections) ? missionOrSections : [] };
+  const disabledSections = isMissionObj && missionOrSections.disabledSections && typeof missionOrSections.disabledSections === 'object'
+    ? missionOrSections.disabledSections
+    : {};
+  const extraFunctionsCode = isMissionObj && typeof missionOrSections.extraFunctionsCode === 'string'
+    ? missionOrSections.extraFunctionsCode.trim()
+    : '';
 
-  const mainCalls = MISSION_SECTIONS.map((sec) => `    ${getMissionSectionFnName(filename, sec.id)}();`);
+  const mainCalls = MISSION_SECTIONS.map((sec) => {
+    const fn = getMissionSectionFnName(filename, sec.id);
+    return disabledSections[sec.id] ? `    // ${fn}();` : `    ${fn}();`;
+  });
   const subFnBlocks = [];
   for (const sec of MISSION_SECTIONS) {
     const fnName = getMissionSectionFnName(filename, sec.id);
@@ -935,14 +1040,21 @@ function blocksToMissionCode(filename, missionOrSections) {
     const lines = secBlocks
       .map((b) => {
         const def = DEF_MAP[b.type];
-        return def ? def.toCode(b.params) : String(b.params.raw || '');
+        const rawLine = def ? def.toCode(b.params) : String(b.params.raw || '');
+        if (!rawLine) return '';
+        if (b.disabled) {
+          const isRawCall = /^[A-Za-z_]\w*\s*\([^;]*\)\s*;(?:\s*\/\/.*)?$/.test(rawLine.trim());
+          const needsTag = b.type === 'RAW' && !isRawCall;
+          return needsTag ? `// [OFF] ${rawLine}` : `// ${rawLine}`;
+        }
+        return rawLine;
       })
       .filter(Boolean)
       .map((line) => `    ${line}`);
     subFnBlocks.push('', `void ${fnName}() {`, ...lines, '}');
   }
 
-  return [
+  const outLines = [
     '// ============================================================================',
     `// ${filename} — ภารกิจโหมดที่ ${modeNum} (สร้างจาก KT Middle IDE)`,
     '// ============================================================================',
@@ -951,15 +1063,19 @@ function blocksToMissionCode(filename, missionOrSections) {
     `void runMode${modeNum}() {`,
     ...mainCalls,
     '}',
-    ...subFnBlocks,
-    ''
-  ].join('\n');
+    ...subFnBlocks
+  ];
+  if (extraFunctionsCode) {
+    outLines.push('', '// --- Extension / Custom Sub-Functions ---', extraFunctionsCode);
+  }
+  outLines.push('');
+  return outLines.join('\n');
 }
 
 function syncMissionToFile(filename, recordUndo = true) {
   const m = ensureMissionStructure(state.missions[filename]);
   if (!m) return;
-  const code = blocksToMissionCode(filename, m.sections);
+  const code = blocksToMissionCode(filename, m);
   state.files[filename] = code;
   if (filename === state.activeMissionFile) {
     renderVisualCodePreview(code, filename);
@@ -990,6 +1106,7 @@ function cloneBlockForDuplicate(blk) {
   return {
     id: state.nextBlockId++,
     type: blk.type,
+    ...(blk.disabled ? { disabled: true } : {}),
     params: JSON.parse(JSON.stringify(blk.params || {}))
   };
 }
@@ -1185,11 +1302,12 @@ function setActiveMission(filename, rebuildReset = true) {
   const m = ensureMissionStructure(state.missions[filename]);
   state.activeMissionFile = filename;
   if (state.mode === 'visual') updateDocumentTitle();
-  renderVisualCodePreview(state.files[filename] || blocksToMissionCode(filename, m.sections), filename);
+  renderVisualCodePreview(state.files[filename] || blocksToMissionCode(filename, m), filename);
   updateMissionChrome();
   renderCanvas();
   if (rebuildReset) rebuildSimAndDraw(true);
   saveCanvasLayout();
+  if (typeof publishPluginBridgeState === 'function') publishPluginBridgeState('active-mission');
 }
 
 function renderMissionQuickBar() {
@@ -2339,6 +2457,16 @@ function showBlockContextMenu(clientX, clientY, opts) {
     return btn;
   };
 
+  if (typeof opts.onToggleDisable === 'function') {
+    menu.appendChild(
+      makeItem(
+        opts.blockDisabled ? 'เปิดใช้งานบล็อก (Uncomment)' : 'ปิดใช้งานบล็อก (Comment //)',
+        opts.blockDisabled ? 'eye' : 'eye-off',
+        false,
+        opts.onToggleDisable
+      )
+    );
+  }
   if (typeof opts.onDuplicate === 'function') {
     menu.appendChild(makeItem('ทำซ้ำ (Duplicate)', 'copy', false, () => opts.onDuplicate(canvasPt)));
   }
@@ -2378,8 +2506,9 @@ document.addEventListener('keydown', (e) => {
 function buildBlockElement(block, opts) {
   const def = DEF_MAP[block.type] || DEF_MAP.RAW;
   const colors = CAT_COLORS[def.cat] || CAT_COLORS.enc;
+  const isDisabled = !!block.disabled;
   const el = document.createElement('div');
-  el.className = `mc-block${opts.loose ? ' loose-block' : ''}${opts.simActive ? ' sim-active' : ''}`;
+  el.className = `mc-block${opts.loose ? ' loose-block' : ''}${opts.simActive ? ' sim-active' : ''}${isDisabled ? ' is-disabled' : ''}${opts.sectionDisabled ? ' in-disabled-sec' : ''}`;
   el.style.setProperty('--blk-bg', colors.bg);
   el.style.setProperty('--blk-dark', colors.dark);
   if (opts.loose) {
@@ -2391,7 +2520,7 @@ function buildBlockElement(block, opts) {
     el.dataset.stackIdx = String(opts.stackIdx ?? 0);
     el.dataset.globalIdx = String(opts.globalIdx ?? -1);
     el.addEventListener('focusin', (e) => {
-      if (e.target.closest('.mc-delete-btn') || !isClickToSeekSimEnabled()) return;
+      if (e.target.closest('.mc-delete-btn, .mc-toggle-btn') || !isClickToSeekSimEnabled()) return;
       seekSimulationToSectionBlock(opts.missionFile, opts.sectionId || 'Box1', opts.stackIdx ?? 0);
     });
   }
@@ -2413,6 +2542,14 @@ function buildBlockElement(block, opts) {
   title.textContent = def.title;
   el.appendChild(title);
 
+  if (isDisabled) {
+    const offTag = document.createElement('span');
+    offTag.className = 'mc-disabled-tag';
+    offTag.textContent = '// OFF';
+    offTag.title = 'บล็อกนี้ถูก Comment ปิดไว้ (โค้ดและ Simulator จะข้ามคำสั่งนี้)';
+    el.appendChild(offTag);
+  }
+
   if (def.fields.length > 0) {
     const pills = document.createElement('div');
     pills.className = 'mc-pills';
@@ -2422,6 +2559,23 @@ function buildBlockElement(block, opts) {
     el.appendChild(pills);
   }
 
+  const actions = document.createElement('div');
+  actions.className = 'mc-actions';
+
+  if (typeof opts.onToggleDisable === 'function') {
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.className = `mc-toggle-btn${isDisabled ? ' is-off' : ''}`;
+    toggleBtn.title = isDisabled
+      ? 'เปิดใช้งานบล็อกนี้ (ยกเลิก Comment)'
+      : 'ปิดใช้งานบล็อกนี้ชั่วคราว (Comment ไว้ไม่ให้ทำงาน)';
+    toggleBtn.setAttribute('aria-pressed', isDisabled ? 'true' : 'false');
+    toggleBtn.innerHTML = svgIcon(isDisabled ? 'eye-off' : 'eye', 'sm');
+    toggleBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+    toggleBtn.onclick = opts.onToggleDisable;
+    actions.appendChild(toggleBtn);
+  }
+
   const delBtn = document.createElement('button');
   delBtn.type = 'button';
   delBtn.className = 'mc-delete-btn';
@@ -2429,7 +2583,9 @@ function buildBlockElement(block, opts) {
   delBtn.innerHTML = svgIcon('close', 'sm');
   delBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
   delBtn.onclick = opts.onDelete;
-  el.appendChild(delBtn);
+  actions.appendChild(delBtn);
+
+  el.appendChild(actions);
 
   el.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || e.target.closest('input, select, button, .mc-reporter-pill')) return;
@@ -2496,6 +2652,8 @@ function renderCanvas() {
 
     const isActive = state.activeMissionFile === mDef.file;
     const totalSteps = getMissionTotalCount(m);
+    const activeSteps = getMissionActiveCount(m);
+    const stepSummary = activeSteps < totalSteps ? `${activeSteps}/${totalSteps} steps` : `${totalSteps} steps`;
     const container = document.createElement('div');
     container.className = `mission-container${isActive ? ' active' : ''}${m.folded ? ' folded' : ''}`;
     container.dataset.mission = mDef.file;
@@ -2510,7 +2668,7 @@ function renderCanvas() {
       ${svgIcon('play', 'sm')}
       <span>${escapeHtml(mDef.title)}</span>
       <span class="hat-pill">${escapeHtml(mDef.fn)}</span>
-      <span class="mission-count-pill">${totalSteps} steps</span>
+      <span class="mission-count-pill">${stepSummary}</span>
     `;
 
     const foldBtn = document.createElement('button');
@@ -2564,9 +2722,16 @@ function renderCanvas() {
       const secBlocks = m.sections[sec.id] || [];
       const isSecActive = isActive && (m.activeSection || 'Box1') === sec.id;
       const isSecFolded = !!m.foldedSections?.[sec.id];
+      const isSecDisabled = !!m.disabledSections?.[sec.id];
+      const secActiveCount = isSecDisabled ? 0 : secBlocks.filter((b) => !b?.disabled).length;
+      const secCountLabel = isSecDisabled
+        ? `0/${secBlocks.length} (//)`
+        : secActiveCount < secBlocks.length
+          ? `${secActiveCount}/${secBlocks.length} steps`
+          : `${secBlocks.length} steps`;
 
       const subCard = document.createElement('div');
-      subCard.className = `mission-subfn${isSecActive ? ' active-subfn' : ''}${isSecFolded ? ' folded' : ''}`;
+      subCard.className = `mission-subfn${isSecActive ? ' active-subfn' : ''}${isSecFolded ? ' folded' : ''}${isSecDisabled ? ' disabled-subfn' : ''}`;
       subCard.dataset.mission = mDef.file;
       subCard.dataset.section = sec.id;
       subCard.style.setProperty('--sub-accent', sec.accent);
@@ -2577,8 +2742,26 @@ function renderCanvas() {
       subHdr.innerHTML = `
         <span class="mission-subfn-dot"></span>
         <span class="mission-subfn-fn">${escapeHtml(fnName)}()</span>
-        <span class="mission-subfn-count">${secBlocks.length} steps</span>
+        <span class="mission-subfn-count">${secCountLabel}</span>
       `;
+
+      const subToggleBtn = document.createElement('button');
+      subToggleBtn.type = 'button';
+      subToggleBtn.className = `mission-subfn-toggle${isSecDisabled ? ' is-off' : ''}`;
+      subToggleBtn.title = isSecDisabled
+        ? `เปิดใช้งาน ${fnName}() (ยกเลิก // Comment ใน runMode)`
+        : `ปิดใช้งาน ${fnName}() ชั่วคราว (Comment // ${fnName}(); ไม่ให้ทำงาน)`;
+      subToggleBtn.setAttribute('aria-pressed', isSecDisabled ? 'true' : 'false');
+      subToggleBtn.innerHTML = `${svgIcon(isSecDisabled ? 'eye-off' : 'eye', 'sm')}<span>${isSecDisabled ? 'ปิดอยู่' : 'เปิด'}</span>`;
+      subToggleBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+      subToggleBtn.onclick = () => {
+        m.disabledSections[sec.id] = !m.disabledSections[sec.id];
+        renderCanvas();
+        syncMissionToFile(mDef.file, true);
+        rebuildSimAndDraw(true);
+        saveCanvasLayout();
+      };
+      subHdr.appendChild(subToggleBtn);
 
       const subFoldBtn = document.createElement('button');
       subFoldBtn.type = 'button';
@@ -2625,11 +2808,20 @@ function renderCanvas() {
             stackIdx: idx,
             globalIdx: myGlobalIdx,
             indexLabel: myGlobalIdx + 1,
-            simActive: isActive && myGlobalIdx === state.sim.activeBlockIndex,
+            simActive: isActive && !blk.disabled && !isSecDisabled && myGlobalIdx === state.sim.activeBlockIndex,
+            blockDisabled: !!blk.disabled,
+            sectionDisabled: isSecDisabled,
             stackTailCount: secBlocks.length - idx,
             onChange: (shouldRender = false, recordUndo = true) => {
               syncMissionToFile(mDef.file, recordUndo);
               if (shouldRender) renderCanvas();
+              saveCanvasLayout();
+            },
+            onToggleDisable: () => {
+              blk.disabled = !blk.disabled;
+              renderCanvas();
+              syncMissionToFile(mDef.file, true);
+              rebuildSimAndDraw(true);
               saveCanvasLayout();
             },
             onDuplicate: (canvasPt) => spawnDuplicatedLooseStack([blk], canvasPt),
@@ -2685,9 +2877,16 @@ function renderCanvas() {
         loose: true,
         looseIdx: lIdx,
         looseBlockIdx: subIdx,
+        blockDisabled: !!blk.disabled,
         stackTailCount: stack.blocks.length - subIdx,
         onChange: (shouldRender = false) => {
           if (shouldRender) renderCanvas();
+          saveCanvasLayout();
+          pushBlockSnapshot();
+        },
+        onToggleDisable: () => {
+          blk.disabled = !blk.disabled;
+          renderCanvas();
           saveCanvasLayout();
           pushBlockSnapshot();
         },
@@ -2866,6 +3065,7 @@ function toggleSimViewMode() {
   syncSimViewButtons();
   saveFieldMapToStorage();
   drawSimulator(state);
+  if (typeof publishPluginBridgeState === 'function') publishPluginBridgeState('view-mode');
 }
 
 function rotateSimIsoCamera() {
@@ -2873,6 +3073,7 @@ function rotateSimIsoCamera() {
   syncSimViewButtons();
   saveFieldMapToStorage();
   drawSimulator(state);
+  if (typeof publishPluginBridgeState === 'function') publishPluginBridgeState('camera-rot');
 }
 
 const LEGACY_REMOVED_TILE_MAP = { 5: 1, 8: 3, 9: 2, 10: 1, 11: 3 };
@@ -2935,6 +3136,7 @@ const mapManager = createMapManagerController({
     if (syncStart) syncSimStartFromFieldStartTile();
     saveFieldMapToStorage();
     rebuildSimAndDraw(!!syncStart);
+    if (typeof publishPluginBridgeState === 'function') publishPluginBridgeState('field-map');
   },
   onBackToSim: () => switchMode('visual'),
   appendConsole
@@ -3766,7 +3968,7 @@ async function syncCalFromConfigIno() {
 async function applyCalToConfigIno() {
   const cal = state.calibration;
   const patch = {
-    ticksPerCm: Number(cal.tpcm) || 15.0,
+    ticksPerCm: Number(cal.tpcm) || 125.4,
     distTuneMm: Math.round(Number(cal.distmm) || 0),
     calRun30cmMs: Math.max(150, Math.round(Number(cal.calms) || 1150)),
     motorTrim: Math.round(Number(cal.trim) || 0),
@@ -3776,20 +3978,20 @@ async function applyCalToConfigIno() {
     backDrop: Math.round(Number(cal.bdrop) || 140),
     showCmdOnRun: !!cal.showcmd,
     beepOnCmd: !!cal.beepcmd,
-    spinKp: Number(cal.spinkp) || 0.9,
-    spinKd: Number(cal.spinkd) || 0.65,
-    turnFrontKp: Number(cal.tfkp) || 1.4,
-    turnFrontKd: Number(cal.tfkd) || 0.55,
-    turnBackKp: Number(cal.tbkp) || 1.4,
-    turnBackKd: Number(cal.tbkd) || 0.55,
-    threshold_spinDegree: Number(cal.tspin) || 2.5,
-    spinLeftOffsetDeg: Number.isFinite(Number(cal.slofs)) ? Number(cal.slofs) : 0.0,
-    smallAngle_turnDegree: Number(cal.tturn) || 4.0,
-    turnRightOffsetDeg: Number.isFinite(Number(cal.trofs)) ? Number(cal.trofs) : 0.0,
-    smallAngle_threshold: Number(cal.sathr) || 55.0,
-    spinMaxSpeed: Math.round(Number(cal.smaxs) || 85),
-    turnFrontMaxSpeed: Math.round(Number(cal.tfmax) || 80),
-    turnBackMaxSpeed: Math.round(Number(cal.tbmax) || 80)
+    spinKp: Number.isFinite(Number(cal.spinkp)) ? Number(cal.spinkp) : DEFAULT_MOTION_CONFIG.spinKp,
+    spinKd: Number.isFinite(Number(cal.spinkd)) ? Number(cal.spinkd) : DEFAULT_MOTION_CONFIG.spinKd,
+    turnFrontKp: Number.isFinite(Number(cal.tfkp)) ? Number(cal.tfkp) : DEFAULT_MOTION_CONFIG.turnFrontKp,
+    turnFrontKd: Number.isFinite(Number(cal.tfkd)) ? Number(cal.tfkd) : DEFAULT_MOTION_CONFIG.turnFrontKd,
+    turnBackKp: Number.isFinite(Number(cal.tbkp)) ? Number(cal.tbkp) : DEFAULT_MOTION_CONFIG.turnBackKp,
+    turnBackKd: Number.isFinite(Number(cal.tbkd)) ? Number(cal.tbkd) : DEFAULT_MOTION_CONFIG.turnBackKd,
+    threshold_spinDegree: Number.isFinite(Number(cal.tspin)) ? Number(cal.tspin) : DEFAULT_MOTION_CONFIG.threshold_spinDegree,
+    spinLeftOffsetDeg: Number.isFinite(Number(cal.slofs)) ? Number(cal.slofs) : DEFAULT_MOTION_CONFIG.spinLeftOffsetDeg,
+    smallAngle_turnDegree: Number.isFinite(Number(cal.tturn)) ? Number(cal.tturn) : DEFAULT_MOTION_CONFIG.smallAngle_turnDegree,
+    turnRightOffsetDeg: Number.isFinite(Number(cal.trofs)) ? Number(cal.trofs) : DEFAULT_MOTION_CONFIG.turnRightOffsetDeg,
+    smallAngle_threshold: Number.isFinite(Number(cal.sathr)) ? Number(cal.sathr) : DEFAULT_MOTION_CONFIG.smallAngle_threshold,
+    spinMaxSpeed: Math.round(Number.isFinite(Number(cal.smaxs)) ? Number(cal.smaxs) : DEFAULT_MOTION_CONFIG.spinMaxSpeed),
+    turnFrontMaxSpeed: Math.round(Number.isFinite(Number(cal.tfmax)) ? Number(cal.tfmax) : DEFAULT_MOTION_CONFIG.turnFrontMaxSpeed),
+    turnBackMaxSpeed: Math.round(Number.isFinite(Number(cal.tbmax)) ? Number(cal.tbmax) : DEFAULT_MOTION_CONFIG.turnBackMaxSpeed)
   };
   if (Array.isArray(cal.smin) && cal.smin.length === 4) patch.senMin = cal.smin.map((n) => Math.round(Number(n) || 0));
   if (Array.isArray(cal.smax) && cal.smax.length === 4) patch.senMax = cal.smax.map((n) => Math.round(Number(n) || 0));
@@ -3985,6 +4187,41 @@ function openConfigModal() {
   $('configModal').hidden = false;
 }
 
+async function commitConfigPatch(patch, saveNote, okMessage, closeAfterSave) {
+  const data = await apiJson('/api/files', {
+    method: 'POST',
+    body: JSON.stringify({
+      configPatch: patch,
+      recordSaveLog: true,
+      saveSource: 'config',
+      saveNote,
+      canvasLayout: buildCurrentCanvasLayout(),
+      calibration: state.calibration,
+      simSettings: getCurrentSimSettings(),
+      blockSummary: buildBlockSummary()
+    })
+  });
+  state.files['Config.ino'] = data.files['Config.ino'];
+  state.savedFiles['Config.ino'] = data.files['Config.ino'];
+  if (data.files['KT_ATOM_Middle.ino'] !== undefined) {
+    state.files['KT_ATOM_Middle.ino'] = data.files['KT_ATOM_Middle.ino'];
+    state.savedFiles['KT_ATOM_Middle.ino'] = data.files['KT_ATOM_Middle.ino'];
+  }
+  state.config = data.config || {};
+  syncCalibrationFromConfig(true);
+  if (state.activeCodeFile === 'Config.ino' || state.activeCodeFile === 'KT_ATOM_Middle.ino') {
+    codeIde.loadFileIntoEditor(state.activeCodeFile, state.files[state.activeCodeFile]);
+  }
+  updateDirtyIndicator();
+  if (data.versions) syncVersionListResponse(data);
+  if (closeAfterSave) $('configModal').hidden = true;
+  else openConfigModal();
+  rebuildSimAndDraw(false);
+  const subNote = data.subVersion ? ` · เก็บ Log ${data.subVersion.versionLabel}` : '';
+  appendConsole(`${okMessage}${subNote}`);
+  if (typeof publishPluginBridgeState === 'function') publishPluginBridgeState('config-saved');
+}
+
 async function saveConfigModal() {
   const patch = {};
   for (const field of CONFIG_FIELDS) {
@@ -3994,32 +4231,30 @@ async function saveConfigModal() {
     else patch[field.key] = field.type === 'bool' ? el.value === 'true' : parseFloat(el.value);
   }
   try {
-    const data = await apiJson('/api/files', {
-      method: 'POST',
-      body: JSON.stringify({
-        configPatch: patch,
-        recordSaveLog: true,
-        saveSource: 'config',
-        saveNote: 'อัปเดตค่า Robot Config',
-        canvasLayout: buildCurrentCanvasLayout(),
-        calibration: state.calibration,
-        simSettings: getCurrentSimSettings(),
-        blockSummary: buildBlockSummary()
-      })
-    });
-    state.files['Config.ino'] = data.files['Config.ino'];
-    state.savedFiles['Config.ino'] = data.files['Config.ino'];
-    state.config = data.config || {};
-    syncCalibrationFromConfig(true);
-    if (state.activeCodeFile === 'Config.ino') codeIde.loadFileIntoEditor('Config.ino', state.files['Config.ino']);
-    updateDirtyIndicator();
-    if (data.versions) syncVersionListResponse(data);
-    rebuildSimAndDraw(false);
-    $('configModal').hidden = true;
-    const subNote = data.subVersion ? ` · เก็บ Log ${data.subVersion.versionLabel}` : '';
-    appendConsole(`[OK] บันทึกค่า Robot Config ลงใน Config.ino เรียบร้อย${subNote}`);
+    await commitConfigPatch(
+      patch,
+      'อัปเดตค่า Robot Config',
+      '[OK] บันทึกค่า Robot Config ลงใน Config.ino เรียบร้อย',
+      true
+    );
   } catch (err) {
     appendConsole(`[ERR] บันทึก Config ไม่สำเร็จ: ${err.message}`);
+  }
+}
+
+async function restoreDefaultMotionConfig() {
+  if (!window.confirm('ต้องการกู้คืนค่าเริ่มต้น Kp, Kd, Speed, Threshold และเปิด useCodeMotionDefaults ตามโค้ดหลักหรือไม่?\n(ค่าคาลิเบรตเซนเซอร์เส้นและเซอร์โวในเครื่องจะยังคงเดิม)')) {
+    return;
+  }
+  try {
+    await commitConfigPatch(
+      { ...DEFAULT_MOTION_CONFIG },
+      'กู้คืนค่าเริ่มต้น Kp/Kd และระบบเดิน',
+      '[OK] กู้คืนค่าเริ่มต้น Kp/Kd และพารามิเตอร์ระบบเดินเรียบร้อยแล้ว',
+      false
+    );
+  } catch (err) {
+    appendConsole(`[ERR] กู้คืนค่าเริ่มต้นไม่สำเร็จ: ${err.message}`);
   }
 }
 
@@ -4962,6 +5197,408 @@ function activateDrawerTab(tabName) {
 }
 
 // ============================================================================
+// Extension Plugins Manager & 100% Offline Bidirectional Live Sync Bridge
+// ============================================================================
+const PLUGIN_BRIDGE_CHANNEL_NAME = 'kt_middle_ide_plugin_bridge_v1';
+const PLUGIN_BRIDGE_LS_KEY = 'kt_middle_ide_plugin_bridge_snapshot_v1';
+const BRIDGE_CLIENT_ID = `main-ide-${Math.random().toString(36).slice(2, 8)}`;
+const pluginBridgeChannel = typeof BroadcastChannel !== 'undefined'
+  ? new BroadcastChannel(PLUGIN_BRIDGE_CHANNEL_NAME)
+  : null;
+
+let suppressBridgeBroadcast = false;
+let pluginBridgeTimer = null;
+
+function buildPluginBridgeSnapshot(reason = 'sync') {
+  return {
+    source: 'main-ide',
+    clientId: BRIDGE_CLIENT_ID,
+    reason,
+    updatedAt: new Date().toISOString(),
+    activeMissionFile: state.activeMissionFile,
+    fieldMap: {
+      rows: state.fieldMap.rows,
+      cols: state.fieldMap.cols,
+      tileWidthCm: state.fieldMap.tileWidthCm,
+      simViewMode: state.fieldMap.simViewMode,
+      simCameraRot: state.fieldMap.simCameraRot,
+      showMarkers: !!state.fieldMap.showMarkers,
+      compactGrid: buildCompactGrid(state.fieldMap.gridData)
+    },
+    simPose: {
+      startCol: Number($('simStartCol')?.value) || 0,
+      startRow: Number($('simStartRow')?.value) || 0,
+      startHeading: Number($('simStartHeading')?.value) || 0,
+      robotX: Number(state.sim.robotX) || 0,
+      robotY: Number(state.sim.robotY) || 0,
+      robotH: Number(state.sim.robotH) || 0,
+      cameraFollowRobot: !!state.sim.cameraFollowRobot
+    },
+    calibration: { ...state.calibration },
+    config: { ...state.config }
+  };
+}
+
+async function flushPluginBridgeState(reason = 'sync') {
+  if (suppressBridgeBroadcast) return;
+  const snapshot = buildPluginBridgeSnapshot(reason);
+  try {
+    localStorage.setItem(PLUGIN_BRIDGE_LS_KEY, JSON.stringify(snapshot));
+  } catch (_) {}
+  try {
+    pluginBridgeChannel?.postMessage({ type: 'bridge-state', clientId: BRIDGE_CLIENT_ID, snapshot });
+  } catch (_) {}
+  try {
+    await fetch('/api/plugin-bridge/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(snapshot)
+    });
+  } catch (_) {}
+}
+
+function publishPluginBridgeState(reason = 'sync', immediate = false) {
+  if (suppressBridgeBroadcast) return;
+  clearTimeout(pluginBridgeTimer);
+  if (immediate) {
+    flushPluginBridgeState(reason);
+    return;
+  }
+  pluginBridgeTimer = setTimeout(() => {
+    flushPluginBridgeState(reason);
+  }, 90);
+}
+
+function applyBridgeSnapshotFromPlugin(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return;
+  const fromPlugin = snapshot.clientId !== BRIDGE_CLIENT_ID && snapshot.source !== 'main-ide' && snapshot.updatedBy !== 'main-ide';
+  if (!fromPlugin && !snapshot.__forceApplyOnBoot) return;
+
+  suppressBridgeBroadcast = true;
+  try {
+    const fm = snapshot.fieldMap || {};
+    const sp = snapshot.simPose || {};
+    const simPatch = {};
+
+    if (Number.isFinite(Number(fm.tileWidthCm))) simPatch.cellCm = Number(fm.tileWidthCm);
+    if (Number.isFinite(Number(fm.cols))) simPatch.cols = Number(fm.cols);
+    if (Number.isFinite(Number(fm.rows))) simPatch.rows = Number(fm.rows);
+    if (fm.simViewMode === '2d' || fm.simViewMode === 'iso') simPatch.simViewMode = fm.simViewMode;
+    if (Number.isFinite(Number(fm.simCameraRot))) simPatch.simCameraRot = Number(fm.simCameraRot);
+    if (Array.isArray(fm.compactGrid)) simPatch.compactGrid = fm.compactGrid;
+    if (sp.startCol !== undefined) simPatch.startCol = Number(sp.startCol);
+    if (sp.startRow !== undefined) simPatch.startRow = Number(sp.startRow);
+    if (sp.startHeading !== undefined) simPatch.startHeading = Number(sp.startHeading);
+
+    if (Object.keys(simPatch).length > 0) {
+      applySimSettings(simPatch);
+    }
+
+    if (sp.cameraFollowRobot !== undefined) {
+      state.sim.cameraFollowRobot = !!sp.cameraFollowRobot;
+      syncSimViewButtons();
+    }
+
+    if (fromPlugin && snapshot.calibration && typeof snapshot.calibration === 'object') {
+      state.calibration = { ...state.calibration, ...snapshot.calibration };
+      renderCalibrationCard();
+    }
+    if (fromPlugin && snapshot.config && typeof snapshot.config === 'object') {
+      state.config = { ...state.config, ...snapshot.config };
+    }
+    if (snapshot.activeMissionFile && state.missions[snapshot.activeMissionFile] && snapshot.activeMissionFile !== state.activeMissionFile) {
+      setActiveMission(snapshot.activeMissionFile, false);
+    }
+
+    if (Number.isFinite(Number(sp.robotX)) && Number.isFinite(Number(sp.robotY)) && Number.isFinite(Number(sp.robotH)) && snapshot.reason === 'sim-pose') {
+      state.sim.robotX = Number(sp.robotX);
+      state.sim.robotY = Number(sp.robotY);
+      state.sim.robotH = Number(sp.robotH);
+      drawSimulator(state);
+    } else {
+      rebuildSimAndDraw(true);
+    }
+
+    if (fromPlugin) {
+      try {
+        localStorage.setItem(PLUGIN_BRIDGE_LS_KEY, JSON.stringify({ ...snapshot, source: 'plugin-applied' }));
+      } catch (_) {}
+    }
+  } finally {
+    suppressBridgeBroadcast = false;
+  }
+}
+
+async function reloadFilesFromPluginEvent(msg = {}) {
+  suppressBridgeBroadcast = true;
+  try {
+    const [filesRes, versionsRes] = await Promise.all([
+      apiJson('/api/files'),
+      apiJson('/api/versions').catch(() => null)
+    ]);
+    state.files = filesRes.files || {};
+    state.savedFiles = { ...state.files };
+    state.config = filesRes.config || {};
+    syncCalibrationFromConfig(true);
+    parseAllMissionsFromFiles();
+
+    if (msg.targetFile && state.missions[msg.targetFile]) {
+      state.activeMissionFile = msg.targetFile;
+    }
+    renderPalette();
+    renderCanvas();
+    renderVisualCodePreview(state.files[state.activeMissionFile] || '', state.activeMissionFile);
+    if (state.activeCodeFile && state.files[state.activeCodeFile] !== undefined) {
+      codeIde.loadFileIntoEditor(state.activeCodeFile, state.files[state.activeCodeFile]);
+    }
+    updateDirtyIndicator();
+    if (versionsRes) syncVersionListResponse(versionsRes);
+    rebuildSimAndDraw(true);
+
+    const who = msg.pluginName || 'แอปเสริม';
+    const fileLabel = msg.targetFile || 'ไฟล์ภารกิจ';
+    const subTag = msg.subVersionLabel ? ` · Save Log ${msg.subVersionLabel}` : '';
+    appendConsole(`[PLUGIN] ซิงค์โค้ดใหม่จาก ${who} เข้า ${fileLabel} เรียบร้อย${subTag}`);
+  } catch (err) {
+    appendConsole(`[WARN] โหลดไฟล์ที่อัปเดตจากแอปเสริมไม่สำเร็จ: ${err.message}`);
+  } finally {
+    suppressBridgeBroadcast = false;
+    publishPluginBridgeState('post-plugin-files');
+  }
+}
+
+function handleIncomingBridgeMessage(msg) {
+  if (!msg || typeof msg !== 'object') return;
+  if (msg.clientId === BRIDGE_CLIENT_ID) return;
+
+  if (msg.type === 'request-sync') {
+    publishPluginBridgeState('plugin-request', true);
+    return;
+  }
+  if (msg.type === 'open-main-config') {
+    openConfigModal();
+    return;
+  }
+  if (msg.type === 'bridge-state' && msg.snapshot) {
+    applyBridgeSnapshotFromPlugin(msg.snapshot);
+    return;
+  }
+  if (msg.type === 'files-updated') {
+    if (msg.snapshot) applyBridgeSnapshotFromPlugin(msg.snapshot);
+    reloadFilesFromPluginEvent(msg);
+  }
+}
+
+if (pluginBridgeChannel) {
+  pluginBridgeChannel.onmessage = (ev) => {
+    handleIncomingBridgeMessage(ev.data);
+  };
+}
+
+window.addEventListener('storage', (ev) => {
+  if (ev.key === PLUGIN_BRIDGE_LS_KEY && ev.newValue) {
+    try {
+      const snap = JSON.parse(ev.newValue);
+      if (snap && snap.source !== 'main-ide' && snap.source !== 'plugin-applied') {
+        applyBridgeSnapshotFromPlugin(snap);
+      }
+    } catch (_) {}
+  }
+});
+
+const CAPABILITY_LABELS = {
+  'field-sync': 'ซิงค์สนาม',
+  'pose-sync': 'ซิงค์ตำแหน่ง/ทิศ',
+  'speed-sync': 'ซิงค์ความเร็ว/Cal',
+  'auto-solve': 'แก้สนามอัตโนมัติ',
+  'custom-waypoints': 'สร้างเส้นทางเอง',
+  'dual-spin-turn': 'รองรับ Spin/Turn/ทั้งคู่',
+  'simulator': 'Simulator ในตัว',
+  'mission-codegen': 'เขียนโค้ด Mission'
+};
+
+function renderPluginToolbar() {
+  const list = state.plugins.list || [];
+  const connected = list.filter((p) => p.connected);
+  if ($('pluginCountBadge')) {
+    $('pluginCountBadge').textContent = String(connected.length);
+  }
+  const bar = $('connectedPluginBar');
+  if (!bar) return;
+  bar.innerHTML = '';
+  bar.hidden = connected.length === 0;
+
+  for (const plugin of connected) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'plugin-launch-btn';
+    btn.title = `เปิดแอปเสริม ${plugin.name} (ซิงค์กับ IDE หลักทันที)`;
+    btn.innerHTML = `
+      <span class="plugin-live-dot" style="background:${escapeHtml(plugin.badgeColor || '#10b981')}"></span>
+      <span>${escapeHtml(plugin.shortName || plugin.name)}</span>
+      <svg class="svg-ico sm"><use href="#ico-external"></use></svg>
+    `;
+    btn.onclick = () => launchPlugin(plugin);
+    bar.appendChild(btn);
+  }
+}
+
+function renderPluginModal() {
+  const container = $('pluginListContainer');
+  if (!container) return;
+  if ($('pluginFolderPath')) {
+    $('pluginFolderPath').textContent = state.plugins.pluginsDir || 'extentions-plugins/';
+  }
+
+  const list = state.plugins.list || [];
+  container.innerHTML = '';
+
+  if (list.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'plugin-empty-state';
+    empty.innerHTML = 'ยังไม่พบแอปเสริมในโฟลเดอร์ <code>/extentions-plugins</code> — วางโฟลเดอร์แอปเสริมพร้อมไฟล์ <code>plugin.json</code> แล้วกด "สแกนโฟลเดอร์"';
+    container.appendChild(empty);
+    return;
+  }
+
+  for (const p of list) {
+    const card = document.createElement('article');
+    card.className = `plugin-card${p.connected ? ' connected' : ''}`;
+
+    const iconName = ['route', 'plug', 'map', 'cube', 'code'].includes(p.icon) ? p.icon : 'plug';
+    const head = document.createElement('div');
+    head.className = 'plugin-card-head';
+    head.innerHTML = `
+      <div class="plugin-card-title">
+        <div class="plugin-icon-box" style="background:${escapeHtml(p.badgeColor || '#0072f5')}">
+          ${svgIcon(iconName)}
+        </div>
+        <div>
+          <h3>${escapeHtml(p.name)}</h3>
+          <div class="plugin-card-sub">/extentions-plugins/${escapeHtml(p.id)} · v${escapeHtml(p.version || '1.0.0')}</div>
+        </div>
+      </div>
+      <span class="plugin-status-pill${p.connected ? ' is-connected' : ''}">${p.connected ? 'เชื่อมต่ออยู่' : 'ยังไม่เชื่อมต่อ'}</span>
+    `;
+
+    const desc = document.createElement('p');
+    desc.className = 'plugin-card-desc';
+    desc.textContent = p.description || 'แอปเสริมทำงานร่วมกับ KT Middle IDE';
+
+    const caps = document.createElement('div');
+    caps.className = 'plugin-caps';
+    for (const c of p.capabilities || []) {
+      const chip = document.createElement('span');
+      chip.className = 'plugin-cap-chip';
+      chip.textContent = CAPABILITY_LABELS[c] || c;
+      caps.appendChild(chip);
+    }
+    if (!p.entryExists) {
+      const warn = document.createElement('span');
+      warn.className = 'plugin-cap-chip';
+      warn.style.color = '#fbbf24';
+      warn.textContent = `ไม่พบไฟล์ ${p.entry}`;
+      caps.appendChild(warn);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'plugin-card-actions';
+
+    const statusMeta = document.createElement('span');
+    statusMeta.className = 'muted';
+    statusMeta.style.fontSize = '11px';
+    statusMeta.textContent = p.offline !== false ? 'Offline 100% Ready' : 'Local Plugin';
+
+    const btns = document.createElement('div');
+    btns.className = 'plugin-card-btns';
+
+    if (p.connected) {
+      const btnOpen = document.createElement('button');
+      btnOpen.type = 'button';
+      btnOpen.className = 'btn btn-xs btn-primary';
+      btnOpen.disabled = !p.entryExists;
+      btnOpen.innerHTML = `${svgIcon('external', 'sm')}<span>เปิดแอป</span>`;
+      btnOpen.onclick = () => launchPlugin(p);
+
+      const btnDisconnect = document.createElement('button');
+      btnDisconnect.type = 'button';
+      btnDisconnect.className = 'btn btn-xs btn-secondary';
+      btnDisconnect.textContent = 'ตัดการเชื่อมต่อ';
+      btnDisconnect.onclick = () => performPluginConnectionAction('disconnect', p.id);
+
+      btns.append(btnOpen, btnDisconnect);
+    } else {
+      const btnConnect = document.createElement('button');
+      btnConnect.type = 'button';
+      btnConnect.className = 'btn btn-xs btn-primary';
+      btnConnect.disabled = !p.entryExists;
+      btnConnect.innerHTML = `${svgIcon('plug', 'sm')}<span>เชื่อมต่อแอป</span>`;
+      btnConnect.onclick = () => performPluginConnectionAction('connect', p.id);
+      btns.appendChild(btnConnect);
+    }
+
+    actions.append(statusMeta, btns);
+    card.append(head, desc, caps, actions);
+    container.appendChild(card);
+  }
+}
+
+async function loadPlugins(showConsoleLog = false) {
+  try {
+    const res = await apiJson('/api/plugins');
+    state.plugins.list = Array.isArray(res.plugins) ? res.plugins : [];
+    state.plugins.connectedIds = Array.isArray(res.connectedIds) ? res.connectedIds : [];
+    state.plugins.primaryPluginId = res.primaryPluginId || null;
+    state.plugins.pluginsDir = res.pluginsDir || '';
+    renderPluginToolbar();
+    if (!$('pluginModal')?.hidden) renderPluginModal();
+    if (showConsoleLog) {
+      appendConsole(`[PLUGIN] สแกนโฟลเดอร์ /extentions-plugins พบ ${state.plugins.list.length} แอปเสริม`);
+    }
+  } catch (err) {
+    appendConsole(`[WARN] โหลดรายการแอปเสริมไม่สำเร็จ: ${err.message}`);
+  }
+}
+
+async function performPluginConnectionAction(action, pluginId) {
+  try {
+    const res = await apiJson('/api/plugins/connect', {
+      method: 'POST',
+      body: JSON.stringify({ action, pluginId })
+    });
+    state.plugins.list = Array.isArray(res.plugins) ? res.plugins : [];
+    state.plugins.connectedIds = Array.isArray(res.connectedIds) ? res.connectedIds : [];
+    state.plugins.primaryPluginId = res.primaryPluginId || null;
+    state.plugins.pluginsDir = res.pluginsDir || state.plugins.pluginsDir;
+    renderPluginToolbar();
+    renderPluginModal();
+    if (action === 'connect') {
+      await publishPluginBridgeState('plugin-connected', true);
+      appendConsole(`[OK] เชื่อมต่อแอปเสริม "${pluginId}" แล้ว — กดปุ่มลัดบนแถบด้านบนเพื่อเข้าแอปได้ทันที`);
+    } else if (action === 'disconnect') {
+      appendConsole(`[INFO] ยกเลิกการเชื่อมต่อแอปเสริม "${pluginId}" แล้ว`);
+    }
+  } catch (err) {
+    appendConsole(`[ERR] จัดการการเชื่อมต่อแอปเสริมไม่สำเร็จ: ${err.message}`);
+  }
+}
+
+async function openPluginModal() {
+  if ($('pluginModal')) $('pluginModal').hidden = false;
+  await loadPlugins(false);
+  renderPluginModal();
+}
+
+async function launchPlugin(plugin) {
+  if (!plugin || !plugin.launchUrl) return;
+  await publishPluginBridgeState('launch-plugin', true);
+  window.open(plugin.launchUrl, `kt_plugin_${plugin.id}`);
+  if ($('pluginModal') && !$('pluginModal').hidden) {
+    $('pluginModal').hidden = true;
+  }
+}
+
+// ============================================================================
 // Initialization & Event Bindings
 // ============================================================================
 async function init() {
@@ -4980,7 +5617,11 @@ async function init() {
   updateDocumentTitle();
 
   try {
-    const [status, filesRes] = await Promise.all([apiJson('/api/status'), apiJson('/api/files')]);
+    const [status, filesRes, bridgeRes] = await Promise.all([
+      apiJson('/api/status'),
+      apiJson('/api/files'),
+      apiJson('/api/plugin-bridge/state').catch(() => null)
+    ]);
     state.files = filesRes.files || {};
     state.savedFiles = { ...state.files };
     state.config = filesRes.config || {};
@@ -4995,7 +5636,25 @@ async function init() {
     renderArtifacts();
     rebuildSimAndDraw(true);
     pushBlockSnapshot(true);
-    await Promise.all([refreshHostPorts(), loadVersions()]);
+    await Promise.all([refreshHostPorts(), loadVersions(), loadPlugins()]);
+
+    let restoredFromPluginBridge = false;
+    const srvBridge = bridgeRes?.bridge;
+    if (srvBridge && (srvBridge.simPose || srvBridge.fieldMap)) {
+      applyBridgeSnapshotFromPlugin({ ...srvBridge, __forceApplyOnBoot: true });
+      restoredFromPluginBridge = srvBridge.updatedBy && srvBridge.updatedBy !== 'main-ide';
+    }
+    if (!restoredFromPluginBridge) {
+      publishPluginBridgeState('init', true);
+    }
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('open') === 'config') {
+      openConfigModal();
+      urlParams.delete('open');
+      const nextSearch = urlParams.toString();
+      const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
+      window.history.replaceState({}, '', nextUrl);
+    }
   } catch (err) {
     appendConsole(`[ERR] ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์: ${err.message}`);
   }
@@ -5085,7 +5744,12 @@ $('btnSyncFromCode').onclick = () => {
 $('btnClearBlocks').onclick = () => {
   if (!confirm(`ล้างคำสั่งทั้งหมดใน ${state.activeMissionFile}?`)) return;
   const m = ensureMissionStructure(state.missions[state.activeMissionFile]);
-  if (m) m.sections = createEmptyMissionSections();
+  if (m) {
+    m.sections = createEmptyMissionSections();
+    m.disabledSections = {};
+    m.extraFunctionsCode = '';
+    m.extraFunctionsBlocks = {};
+  }
   renderCanvas();
   syncMissionToFile(state.activeMissionFile);
   saveCanvasLayout();
@@ -5122,6 +5786,7 @@ if ($('btnCodeSimReset')) $('btnCodeSimReset').onclick = resetSimPose;
       mapManager.refreshFromExternal();
     }
     rebuildSimAndDraw(true);
+    publishPluginBridgeState('sim-grid-input');
   };
 });
 
@@ -5133,6 +5798,7 @@ if ($('btnSimSyncStart')) {
   $('btnSimSyncStart').onclick = () => {
     if (syncSimStartFromFieldStartTile()) {
       rebuildSimAndDraw(true);
+      publishPluginBridgeState('sync-start-tile');
       appendConsole('[OK] ซิงก์ตำแหน่งหุ่นยนต์ไปที่แผ่น START (#31) เรียบร้อย');
     } else {
       appendConsole('[WARN] ไม่พบแผ่น START (#31) บนสนาม — ใช้ค่า Start X/Y ปัจจุบัน');
@@ -5150,6 +5816,12 @@ if ($('btnSimQuickScan')) {
 }
 
 if ($('btnToggleAutoSave')) $('btnToggleAutoSave').onclick = toggleAutoSave;
+if ($('btnOpenPlugins')) $('btnOpenPlugins').onclick = openPluginModal;
+if ($('btnClosePluginModal')) $('btnClosePluginModal').onclick = () => { $('pluginModal').hidden = true; };
+if ($('btnRescanPlugins')) $('btnRescanPlugins').onclick = () => loadPlugins(true);
+if ($('pluginModal')) {
+  $('pluginModal').onclick = (e) => { if (e.target === $('pluginModal')) $('pluginModal').hidden = true; };
+}
 if ($('btnOpenVersions')) $('btnOpenVersions').onclick = openVersionModal;
 if ($('btnCloseVersion')) $('btnCloseVersion').onclick = () => { $('versionModal').hidden = true; };
 if ($('btnVerCoverMode')) {
@@ -5203,6 +5875,7 @@ $('btnSerialClear').onclick = () => { $('serialLog').textContent = ''; };
 $('btnOpenConfig').onclick = openConfigModal;
 $('btnCloseConfig').onclick = () => { $('configModal').hidden = true; };
 $('btnCancelConfig').onclick = () => { $('configModal').hidden = true; };
+if ($('btnRestoreDefaultConfig')) $('btnRestoreDefaultConfig').onclick = restoreDefaultMotionConfig;
 $('btnSaveConfig').onclick = saveConfigModal;
 
 window.addEventListener('keydown', (e) => {
@@ -5211,6 +5884,7 @@ window.addEventListener('keydown', (e) => {
 
   if (e.key === 'Escape') {
     if (!$('imageLightboxModal')?.hidden) { $('imageLightboxModal').hidden = true; return; }
+    if (!$('pluginModal')?.hidden) { $('pluginModal').hidden = true; return; }
     if (!$('shortcutsModal')?.hidden) { $('shortcutsModal').hidden = true; return; }
     if (!$('ideSettingsModal')?.hidden) { $('ideSettingsModal').hidden = true; return; }
     if (!$('versionModal')?.hidden) { $('versionModal').hidden = true; return; }

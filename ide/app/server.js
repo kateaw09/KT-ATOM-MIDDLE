@@ -9,12 +9,26 @@ const {
   LIBRARIES_DIR,
   ARDUINO_CLI,
   VERSIONS_DIR,
+  PLUGINS_DIR,
   MIME_TYPES,
   createApiMiddleware
 } = require('./backend/apiMiddleware');
 
 const DIST_DIR = path.join(__dirname, 'dist');
-const USE_PROD = process.argv.includes('--prod') && fs.existsSync(path.join(DIST_DIR, 'index.html'));
+const HAS_DIST = fs.existsSync(path.join(DIST_DIR, 'index.html'));
+
+function isViteAvailable() {
+  try {
+    require.resolve('vite', { paths: [__dirname] });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+const FORCE_PROD = process.argv.includes('--prod') || process.argv.includes('--offline');
+const HAS_VITE = isViteAvailable();
+const USE_PROD = (FORCE_PROD && HAS_DIST) || (!HAS_VITE && HAS_DIST);
 
 function serveDistFile(reqPath, res) {
   const clean = reqPath === '/' ? 'index.html' : reqPath.replace(/^\/+/, '');
@@ -29,8 +43,10 @@ function serveDistFile(reqPath, res) {
     ? fullPath
     : path.join(DIST_DIR, 'index.html');
   const ext = path.extname(resolved).toLowerCase();
+  const stat = fs.statSync(resolved);
   res.writeHead(200, {
     'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
+    'Content-Length': stat.size,
     'Cache-Control': 'no-store'
   });
   fs.createReadStream(resolved).pipe(res);
@@ -38,18 +54,26 @@ function serveDistFile(reqPath, res) {
 
 async function start() {
   if (USE_PROD) {
+    const modeLabel = HAS_VITE ? 'Vite Dist Production' : 'Offline Pure Node / Dist Server';
     const api = createApiMiddleware();
     const server = http.createServer((req, res) => {
       api(req, res, () => serveDistFile(decodeURIComponent(req.url.split('?')[0]), res));
     });
     server.listen(PORT, '0.0.0.0', () => {
-      console.log(`KT Middle IDE (Vite Dist Production) running at http://localhost:${PORT}`);
+      console.log(`KT Middle IDE (${modeLabel}) running at http://localhost:${PORT}`);
       console.log(`Sketch Directory : ${SKETCH_DIR}`);
       console.log(`Versions Store   : ${VERSIONS_DIR}`);
+      console.log(`Plugins Dir      : ${PLUGINS_DIR}`);
       console.log(`Libraries Dir    : ${LIBRARIES_DIR || '(default Arduino libraries)'}`);
       console.log(`Arduino CLI      : ${ARDUINO_CLI}`);
     });
     return;
+  }
+
+  if (!HAS_VITE) {
+    console.error('[ERR] Neither Vite (node_modules) nor prebuilt dist/index.html was found.');
+    console.error('      Run "npm.cmd install" and "npm.cmd run build" once while online.');
+    process.exit(1);
   }
 
   const { createServer } = require('vite');
@@ -66,6 +90,7 @@ async function start() {
   console.log(`KT Middle IDE (Vite Server) running at http://localhost:${PORT}`);
   console.log(`Sketch Directory : ${SKETCH_DIR}`);
   console.log(`Versions Store   : ${VERSIONS_DIR}`);
+  console.log(`Plugins Dir      : ${PLUGINS_DIR}`);
   console.log(`Libraries Dir    : ${LIBRARIES_DIR || '(default Arduino libraries)'}`);
   console.log(`Arduino CLI      : ${ARDUINO_CLI}`);
 }

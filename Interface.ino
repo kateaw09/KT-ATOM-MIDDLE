@@ -1184,7 +1184,36 @@ static void onAutoTuneProgress(const char* stage, int pct, float lastErr) {
     tft.printf("Trn:%4.1f Ofs:%+4.1f", smallAngle_turnDegree, turnRightOffsetDeg);
 }
 
+static void screenAutoTuneLocked() {
+    uiDrawTopBar("AUTO TUNE", "LOCK", ST77XX_RED);
+    tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
+    tft.drawRoundRect(8, 26, 144, 74, 5, ST77XX_RED);
+    tft.setTextSize(1);
+    tft.setTextColor(0xFFE0, ST77XX_BLACK);
+    tft.setCursor(16, 33);
+    tft.print("LOCKED BY CODE DEF");
+    tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+    tft.setCursor(16, 49);
+    tft.print("Using Config.ino");
+    tft.setTextColor(0x07FF, ST77XX_BLACK);
+    tft.setCursor(16, 65);
+    tft.print("Set [2.CODE DEF] OFF");
+    tft.setCursor(16, 79);
+    tft.print("to enable Auto Tune");
+    uiDrawBottomBar("[A/B] Back", "LOCKED");
+
+    maxBeep(60);
+    delay(50);
+    maxBeep(60);
+    while (pollButtonAction() == BTN_NONE) { delay(20); }
+}
+
 static void screenAutoTuneTurn() {
+    if (useCodeMotionDefaults) {
+        screenAutoTuneLocked();
+        return;
+    }
+
     uiDrawTopBar("AUTO TUNE", "WAIT", UI_COLOR_TOP_ORANGE);
     tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
     tft.drawRoundRect(10, 24, 140, 78, 6, 0xFFE0);
@@ -1297,57 +1326,65 @@ static void drawRunSetupCards(int selected, bool sentSerialBadge) {
     uiDrawTopBar("6. RUN SETUP", "CFG", UI_COLOR_TOP_BLUE);
     tft.fillRect(0, 20, 160, 88, ST77XX_BLACK);
 
-    const char* labels[4] = {
-        "1. AUTO TUNE TURN",
-        "2. SEND TO SERIAL",
-        "3. SHOW CMD",
-        "4. CMD BEEP"
+    const char* labels[5] = {
+        "1. AUTO TUNE",
+        "2. CODE DEF",
+        "3. SEND SERIAL",
+        "4. SHOW CMD",
+        "5. CMD BEEP"
     };
 
-    for (int i = 0; i < 4; i++) {
-        int y = 21 + i * 17;
+    for (int i = 0; i < 5; i++) {
+        int y = 21 + i * 14;
         bool sel = (i == selected);
         uint16_t bg = sel ? 0x07FF : UI_COLOR_CARD_BG;
         uint16_t bd = sel ? 0xFFE0 : UI_COLOR_CARD_LINE;
 
-        tft.fillRoundRect(6, y, 148, 15, 3, bg);
-        tft.drawRoundRect(6, y, 148, 15, 3, bd);
+        tft.fillRoundRect(6, y, 148, 13, 3, bg);
+        tft.drawRoundRect(6, y, 148, 13, 3, bd);
 
         tft.setTextSize(1);
         tft.setTextColor(sel ? ST77XX_BLACK : ST77XX_WHITE, bg);
-        tft.setCursor(11, y + 4);
+        tft.setCursor(11, y + 3);
         tft.print(labels[i]);
 
         if (i == 0) {
-            const char* sub = "Run";
-            int sw = strlen(sub) * 6;
-            tft.setTextColor(sel ? ST77XX_BLACK : 0xFFE0, bg);
-            tft.setCursor(148 - sw, y + 4);
-            tft.print(sub);
-        } else if (i == 1) {
+            if (useCodeMotionDefaults) {
+                tft.fillRoundRect(118, y + 1, 30, 11, 3, ST77XX_RED);
+                tft.setTextColor(ST77XX_WHITE, ST77XX_RED);
+                tft.setCursor(121, y + 3);
+                tft.print("LOCK");
+            } else {
+                const char* sub = "Run";
+                int sw = strlen(sub) * 6;
+                tft.setTextColor(sel ? ST77XX_BLACK : 0xFFE0, bg);
+                tft.setCursor(148 - sw, y + 3);
+                tft.print(sub);
+            }
+        } else if (i == 2) {
             uint16_t pillBg = sentSerialBadge ? ST77XX_GREEN : 0x2104;
             const char* pillTxt = sentSerialBadge ? "SENT!" : "Print";
-            int pw = sentSerialBadge ? 34 : 34;
-            tft.fillRoundRect(116, y + 2, pw, 11, 3, pillBg);
+            tft.fillRoundRect(114, y + 1, 34, 11, 3, pillBg);
             tft.setTextColor(sentSerialBadge ? ST77XX_BLACK : 0x07FF, pillBg);
-            tft.setCursor(118, y + 4);
+            tft.setCursor(116, y + 3);
             tft.print(pillTxt);
         } else {
-            bool on = (i == 2) ? showCmdOnRun : beepOnCmd;
+            bool on = (i == 1) ? useCodeMotionDefaults
+                               : ((i == 3) ? showCmdOnRun : beepOnCmd);
             uint16_t pillBg = on ? ST77XX_GREEN : ST77XX_RED;
-            tft.fillRoundRect(122, y + 2, 26, 11, 3, pillBg);
+            tft.fillRoundRect(122, y + 1, 26, 11, 3, pillBg);
             tft.setTextColor(ST77XX_BLACK, pillBg);
-            tft.setCursor(on ? 129 : 126, y + 4);
+            tft.setCursor(on ? 129 : 126, y + 3);
             tft.print(on ? "ON" : "OFF");
         }
     }
 
-    bool backSel = (selected == 4);
-    tft.fillRoundRect(6, 90, 148, 15, 3, backSel ? 0x07FF : UI_COLOR_CARD_BG);
-    tft.drawRoundRect(6, 90, 148, 15, 3, backSel ? 0xFFE0 : UI_COLOR_CARD_LINE);
+    bool backSel = (selected == 5);
+    tft.fillRoundRect(6, 92, 148, 14, 3, backSel ? 0x07FF : UI_COLOR_CARD_BG);
+    tft.drawRoundRect(6, 92, 148, 14, 3, backSel ? 0xFFE0 : UI_COLOR_CARD_LINE);
     tft.setTextSize(1);
     tft.setTextColor(backSel ? ST77XX_BLACK : ST77XX_WHITE, backSel ? 0x07FF : UI_COLOR_CARD_BG);
-    tft.setCursor(54, 94);
+    tft.setCursor(54, 95);
     tft.print("<- BACK");
 
     uiDrawBottomBar("[A/B] Move", "[A+B] OK");
@@ -1367,21 +1404,29 @@ static void screenRunSetup() {
         }
 
         int act = pollButtonAction();
-        if (act == BTN_A)      { idx = (idx - 1 + 5) % 5; sentBadge = false; }
-        else if (act == BTN_B) { idx = (idx + 1) % 5; sentBadge = false; }
+        if (act == BTN_A)      { idx = (idx - 1 + 6) % 6; sentBadge = false; }
+        else if (act == BTN_B) { idx = (idx + 1) % 6; sentBadge = false; }
         else if (act == BTN_AB) {
             if (idx == 0) {
                 sentBadge = false;
-                screenAutoTuneTurn();
+                if (useCodeMotionDefaults) {
+                    screenAutoTuneLocked();
+                } else {
+                    screenAutoTuneTurn();
+                }
             } else if (idx == 1) {
+                sentBadge = false;
+                configSetCodeMotionDefaults(!useCodeMotionDefaults);
+                maxBeep(80);
+            } else if (idx == 2) {
                 configPrintCalibrationJson();
                 maxBeep(100);
                 sentBadge = true;
-            } else if (idx == 2) {
+            } else if (idx == 3) {
                 sentBadge = false;
                 showCmdOnRun = !showCmdOnRun;
                 configSave();
-            } else if (idx == 3) {
+            } else if (idx == 4) {
                 sentBadge = false;
                 beepOnCmd = !beepOnCmd;
                 configSave();

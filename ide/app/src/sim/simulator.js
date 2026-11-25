@@ -53,6 +53,16 @@ export function evalSegmentPose(seg, tRaw) {
   };
 }
 
+export function normalizeGridConfig(raw = {}) {
+  const cellCm = Math.max(5, Math.min(200, Number(raw.cellCm ?? raw.tileWidthCm) || 30));
+  const cols = Math.max(2, Math.min(24, parseInt(raw.cols, 10) || 7));
+  const rows = Math.max(2, Math.min(24, parseInt(raw.rows, 10) || 7));
+  const startCol = Math.max(0, Math.min(cols - 1, parseInt(raw.startCol, 10) || 0));
+  const startRow = Math.max(0, Math.min(rows - 1, parseInt(raw.startRow, 10) || 0));
+  const startHeading = Number(raw.startHeading) || 0;
+  return { cellCm, cols, rows, startCol, startRow, startHeading, arenaW: cols * cellCm, arenaH: rows * cellCm };
+}
+
 export function getGridConfig() {
   const cellCm = Math.max(5, Math.min(200, parseFloat(document.getElementById('simCellSizeCm')?.value) || 30));
   const cols = Math.max(2, Math.min(24, parseInt(document.getElementById('simGridCols')?.value, 10) || 7));
@@ -67,9 +77,32 @@ export function getGridConfig() {
   return { cellCm, cols, rows, startCol, startRow, startHeading, arenaW: cols * cellCm, arenaH: rows * cellCm };
 }
 
-export function buildSimSegments(state) {
-  const grid = getGridConfig();
-  const cal = state.calibration;
+function expandBlocksWithCustomCalls(rawBlocks, extraFunctionsBlocks, topIdx = null, depth = 0) {
+  if (!Array.isArray(rawBlocks) || depth > 4) return [];
+  const fnMap = extraFunctionsBlocks && typeof extraFunctionsBlocks === 'object' ? extraFunctionsBlocks : null;
+  const out = [];
+  rawBlocks.forEach((b, i) => {
+    const effectiveTopIdx = topIdx !== null ? topIdx : i;
+    if (!b || b.disabled || b.__secDisabled) return;
+    if (fnMap && b.type === 'RAW' && typeof b.params?.raw === 'string') {
+      const m = b.params.raw.trim().match(/^([A-Za-z_]\w*)\s*\(\s*\)\s*;?(?:\s*\/\/.*)?$/);
+      if (m) {
+        const key = Object.keys(fnMap).find((k) => k.toLowerCase() === m[1].toLowerCase());
+        if (key && Array.isArray(fnMap[key])) {
+          const inner = expandBlocksWithCustomCalls(fnMap[key], fnMap, effectiveTopIdx, depth + 1);
+          for (const item of inner) out.push(item);
+          return;
+        }
+      }
+    }
+    out.push({ block: b, idx: effectiveTopIdx });
+  });
+  return out;
+}
+
+export function buildSimSegments(state, overrideOpts = null) {
+  const grid = overrideOpts?.grid ? normalizeGridConfig(overrideOpts.grid) : getGridConfig();
+  const cal = state.calibration || {};
   const vars = state.variables || [];
   const tuneScale = getCalTuneScale(cal);
   const trim = Number(cal.trim) || 0;
@@ -88,10 +121,17 @@ export function buildSimSegments(state) {
   let y = (grid.startRow + 0.5) * grid.cellCm;
   let h = grid.startHeading;
 
-  const missionObj = state.missions[state.activeMissionFile];
-  const blocks = missionObj?.sections
-    ? MISSION_SECTIONS.flatMap((sec) => missionObj.sections[sec.id] || [])
-    : (missionObj?.blocks || []);
+  const missionObj = state.missions?.[state.activeMissionFile];
+  const rawBlocks = Array.isArray(overrideOpts?.blocks)
+    ? overrideOpts.blocks
+    : missionObj?.sections
+      ? MISSION_SECTIONS.flatMap((sec) => {
+          const secDisabled = !!missionObj.disabledSections?.[sec.id];
+          return (missionObj.sections[sec.id] || []).map((b) => (secDisabled ? { ...b, __secDisabled: true } : b));
+        })
+      : (missionObj?.blocks || []);
+  const extraFnBlocks = overrideOpts?.extraFunctionsBlocks ?? missionObj?.extraFunctionsBlocks ?? null;
+  const expandedBlocks = expandBlocksWithCustomCalls(rawBlocks, extraFnBlocks);
   const segments = [];
   let nominalCm = 0;
   let calibratedCm = 0;
@@ -194,7 +234,7 @@ export function buildSimSegments(state) {
     h = nh;
   };
 
-  blocks.forEach((b, idx) => {
+  expandedBlocks.forEach(({ block: b, idx }) => {
     const p = b.params || {};
     const spd = evalExpression(p.speed, vars, 60);
     const cm = evalExpression(p.cm, vars, 30);
@@ -307,10 +347,11 @@ export function buildSimSegments(state) {
       case 'SETF':
       case 'SETF_BACK':
       case 'SETF_DIR': {
+        const approachCm = Math.max(grid.cellCm * 0.1, grid.cellCm * 0.4 - (enableComp ? turnExitCarryCm : 0));
         turnExitCarryCm = 0;
         const backCm = evalExpression(p.cm, vars, 0);
         const d = p.dir ? resolveDirValue(p.dir, vars) : '';
-        pushMove(idx, grid.cellCm * 0.4, spd, 'SetF Align', 'line');
+        pushMove(idx, approachCm, spd, 'SetF Align', 'line');
         if (backCm) pushMove(idx, -backCm, spd, `Back ${backCm}cm`);
         if (d) pushTurn(idx, dirToAngle(d), `Spin '${d}'`, false);
         break;
@@ -318,26 +359,31 @@ export function buildSimSegments(state) {
       case 'SETB':
       case 'SETB_FWD':
       case 'SETB_DIR': {
+        const approachCm = Math.max(grid.cellCm * 0.1, grid.cellCm * 0.4 + (enableComp ? turnExitCarryCm : 0));
         turnExitCarryCm = 0;
         const fwdCm = evalExpression(p.cm, vars, 0);
         const d = p.dir ? resolveDirValue(p.dir, vars) : '';
-        pushMove(idx, -grid.cellCm * 0.4, spd, 'SetB Align', 'line');
+        pushMove(idx, -approachCm, spd, 'SetB Align', 'line');
         if (fwdCm) pushMove(idx, fwdCm, spd, `Fwd ${fwdCm}cm`);
         if (d) pushTurn(idx, dirToAngle(d), `Spin '${d}'`, false);
         break;
       }
-      case 'DROPF_SPD':
+      case 'DROPF_SPD': {
+        const approachCm = Math.max(grid.cellCm * 0.1, grid.cellCm * 0.4 - (enableComp ? turnExitCarryCm : 0));
         turnExitCarryCm = 0;
-        pushMove(idx, grid.cellCm * 0.4, spd, 'DropF Check', 'line');
+        pushMove(idx, approachCm, spd, 'DropF Check', 'line');
         totalMs += 200;
         segments.push({ blockIdx: idx, fx: x, fy: y, fh: h, tx: x, ty: y, th: h, startMs: totalMs - 200, endMs: totalMs, speedCmPs: 0, label: 'DropF Cube', ticks: 0, effCm: 0, dur: 200, marker: 'drop' });
         break;
-      case 'DROPB_SPD':
+      }
+      case 'DROPB_SPD': {
+        const approachCm = Math.max(grid.cellCm * 0.1, grid.cellCm * 0.4 + (enableComp ? turnExitCarryCm : 0));
         turnExitCarryCm = 0;
-        pushMove(idx, -grid.cellCm * 0.4, spd, 'DropB Check', 'line');
+        pushMove(idx, -approachCm, spd, 'DropB Check', 'line');
         totalMs += 200;
         segments.push({ blockIdx: idx, fx: x, fy: y, fh: h, tx: x, ty: y, th: h, startMs: totalMs - 200, endMs: totalMs, speedCmPs: 0, label: 'DropB Cube', ticks: 0, effCm: 0, dur: 200, marker: 'drop' });
         break;
+      }
       case 'DROPF':
       case 'DROPB':
         totalMs += 300;
@@ -368,15 +414,16 @@ export function buildSimSegments(state) {
   };
 }
 
-function renderSimToTarget(state, canvas, teleIds) {
-  if (!canvas) return;
+export function renderSimToTarget(state, canvas, teleIds = null, overrideOpts = null) {
+  if (!canvas) return null;
   const ctx = canvas.getContext('2d');
-  const grid = getGridConfig();
+  const grid = overrideOpts?.grid ? normalizeGridConfig(overrideOpts.grid) : getGridConfig();
   const fieldMap = state.fieldMap;
   const hasFieldGrid = Array.isArray(fieldMap?.gridData) && fieldMap.gridData.length > 0;
   const segs = state.sim.segments;
   const followCam = !!state.sim.cameraFollowRobot;
   const normHeading = (((Math.round(state.sim.robotH) % 360) + 360) % 360);
+  let outLayout = null;
 
   const simOverlay = {
     tileWidthCm: grid.cellCm,
@@ -409,10 +456,14 @@ function renderSimToTarget(state, canvas, teleIds) {
   } else if (hasFieldGrid) {
     const layout = render2DFieldGrid(canvas, fieldMap.gridData, {
       showMarkers: !!fieldMap.showMarkers,
-      padding: 26,
+      padding: Number(overrideOpts?.padding ?? 26),
       simOverlay,
       cameraFollowRobot: followCam
     });
+    outLayout = layout;
+    if (typeof overrideOpts?.after2DRender === 'function') {
+      overrideOpts.after2DRender(ctx, canvas, layout, grid);
+    }
     ctx.fillStyle = '#94a3b8';
     ctx.font = '10px "JetBrains Mono", monospace';
     ctx.textAlign = 'left';
@@ -523,10 +574,10 @@ function renderSimToTarget(state, canvas, teleIds) {
   const zMm = hasFieldGrid ? getElevationAtCm(fieldMap.gridData, state.sim.robotX, state.sim.robotY, grid.cellCm) : 5;
   const zNote = Math.round(zMm) !== 5 ? ` · Z:${zMm.toFixed(0)}mm` : '';
 
-  const teleStep = document.getElementById(teleIds.step);
-  const telePose = document.getElementById(teleIds.pose);
-  const teleClock = document.getElementById(teleIds.clock);
-  const teleTile = document.getElementById(teleIds.tile);
+  const teleStep = teleIds?.step ? document.getElementById(teleIds.step) : null;
+  const telePose = teleIds?.pose ? document.getElementById(teleIds.pose) : null;
+  const teleClock = teleIds?.clock ? document.getElementById(teleIds.clock) : null;
+  const teleTile = teleIds?.tile ? document.getElementById(teleIds.tile) : null;
   if (teleStep) teleStep.textContent = curLabel;
   if (telePose) telePose.textContent = `${state.sim.robotX.toFixed(1)}, ${state.sim.robotY.toFixed(1)} cm · ${normHeading}°${zNote}`;
   if (teleClock) teleClock.textContent = `${stats.calibratedCm.toFixed(1)} cm (${stats.totalTicks} t) · ${elapsedSec.toFixed(2)}s / ${stats.estSec.toFixed(2)}s`;
@@ -547,6 +598,7 @@ function renderSimToTarget(state, canvas, teleIds) {
       teleTile.textContent = 'Default Grid';
     }
   }
+  return { grid, layout: outLayout };
 }
 
 export function drawSimulator(state) {

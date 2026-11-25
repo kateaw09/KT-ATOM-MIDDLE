@@ -22,14 +22,17 @@ void setup() {
     }
     setupEncodersPT();
 
-    // 2. โหลดค่าที่คาลิเบรตไว้จาก Flash (ไม่เขียนทับค่า Assembly เว้นแต่เปิดใน Config.ino)
+    // 2. เปิดใช้ค่าเริ่มต้นการเดิน/หมุน/เลี้ยวจากโค้ด Config.ino (คอมเม้นต์บรรทัดนี้หากต้องการปิดและใช้ค่าจาก Flash/AutoTune)
+    enableCodeMotionDefaults();
+
+    // 3. โหลดค่าที่คาลิเบรตไว้จาก Flash (ไม่เขียนทับค่า Assembly เว้นแต่เปิดใน Config.ino)
     configLoad();
 
-    // 3. ตั้งเซอร์โวหน้า-หลังให้อยู่ตำแหน่ง Lock ตลอดเมื่อเริ่มต้น
+    // 4. ตั้งเซอร์โวหน้า-หลังให้อยู่ตำแหน่ง Lock ตลอดเมื่อเริ่มต้น
     setServoAngle(SERVO_S0, frontLock);
     setServoAngle(SERVO_S1, backLock);
 
-    // 4. เข้าสู่หน้าจอ UI (กด SW A ค้างตอนเปิดเครื่อง = Assembly Mode, ปกติ = Ready-to-Run)
+    // 5. เข้าสู่หน้าจอ UI (กด SW A ค้างตอนเปิดเครื่อง = Assembly Mode, ปกติ = Ready-to-Run)
     interfaceBegin();
 }
 

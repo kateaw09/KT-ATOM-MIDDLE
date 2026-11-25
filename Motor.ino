@@ -188,105 +188,6 @@ float safeReadYaw() {
     return angleRead(YAW);
 }
 
-// ============================================================================
-// Encoder + IMU Complementary Heading Fusion (ลด Lag 10ms ของ IMU + กันส่ายตอนออกโค้ง)
-// ============================================================================
-static const float FUSED_EFF_TRACK_CM = 15.8f; // 4WD skid-steer effective track (track 11.5cm, wheelbase 7.5cm)
-
-static float         s_fusedYaw          = 0.0f;
-static float         s_fusedRateDeg100ms = 0.0f; // + = CW (ขวา), - = CCW (ซ้าย)
-static float         s_fusedLastImuYaw   = 0.0f;
-static long          s_fusedPrevEnc[4]   = { 0, 0, 0, 0 };
-static unsigned long s_fusedLastMs       = 0;
-static unsigned long s_fusedLastImuMs    = 0;
-static bool          s_fusedInit         = false;
-
-static float wrapFusedDeg180(float deg) {
-    while (deg > 180.0f)  deg -= 360.0f;
-    while (deg < -180.0f) deg += 360.0f;
-    return deg;
-}
-
-void fusedHeadingOnEncoderReset() {
-    s_fusedPrevEnc[0] = 0;
-    s_fusedPrevEnc[1] = 0;
-    s_fusedPrevEnc[2] = 0;
-    s_fusedPrevEnc[3] = 0;
-}
-
-void fusedHeadingSyncToImu() {
-    float imuYaw = safeReadYaw();
-    readPtEncoders(s_fusedPrevEnc);
-    s_fusedYaw          = imuYaw;
-    s_fusedLastImuYaw   = imuYaw;
-    s_fusedRateDeg100ms = 0.0f;
-    s_fusedLastMs       = millis();
-    s_fusedLastImuMs    = s_fusedLastMs;
-    s_fusedInit         = true;
-}
-
-void fusedHeadingUpdate(float &outYaw, float &outRateDeg100ms) {
-    unsigned long now = millis();
-    float imuYaw = safeReadYaw();
-    long curEnc[4];
-    readPtEncoders(curEnc);
-
-    if (!s_fusedInit || (now - s_fusedLastMs) > 250UL ||
-        fabsf(wrapFusedDeg180(imuYaw - s_fusedLastImuYaw)) > 35.0f) {
-        s_fusedYaw          = imuYaw;
-        s_fusedLastImuYaw   = imuYaw;
-        s_fusedRateDeg100ms = 0.0f;
-        for (int i = 0; i < 4; i++) s_fusedPrevEnc[i] = curEnc[i];
-        s_fusedLastMs       = now;
-        s_fusedLastImuMs    = now;
-        s_fusedInit         = true;
-        outYaw = s_fusedYaw;
-        outRateDeg100ms = 0.0f;
-        return;
-    }
-
-    // 1) อัปเดตมุมทันทีจาก Encoder ทั้ง 4 ล้อ (ไม่มีดีเลย์ I2C)
-    float dL = 0.5f * (float)((curEnc[0] - s_fusedPrevEnc[0]) + (curEnc[1] - s_fusedPrevEnc[1]));
-    float dR = 0.5f * (float)((curEnc[2] - s_fusedPrevEnc[2]) + (curEnc[3] - s_fusedPrevEnc[3]));
-    for (int i = 0; i < 4; i++) s_fusedPrevEnc[i] = curEnc[i];
-
-    float tpcm = max(80.0f, ticksPerCm);
-    float dYawEnc = ((dL - dR) / (tpcm * FUSED_EFF_TRACK_CM)) * 57.2957795f;
-    if (fabsf(dYawEnc) > 25.0f) dYawEnc = 0.0f; // กันกระโดดถ้ามี reset จากภายนอก
-
-    s_fusedYaw = wrapFusedDeg180(s_fusedYaw + dYawEnc);
-
-    unsigned long dtMs = now - s_fusedLastMs;
-    if (dtMs >= 2UL) {
-        float encRate100ms = constrain(dYawEnc * (100.0f / (float)dtMs), -120.0f, 120.0f);
-        s_fusedRateDeg100ms = 0.35f * encRate100ms + 0.65f * s_fusedRateDeg100ms;
-        s_fusedLastMs = now;
-    }
-
-    // 2) ผสานแก้ Slip/Drift ด้วยค่าจริงจาก BNO085 ทุกเฟรมที่อัปเดต
-    float dImu = wrapFusedDeg180(imuYaw - s_fusedLastImuYaw);
-    unsigned long dtImu = now - s_fusedLastImuMs;
-    if (fabsf(dImu) > 0.03f && dtImu >= 4UL) {
-        float imuErr = wrapFusedDeg180(imuYaw - s_fusedYaw);
-        s_fusedYaw = wrapFusedDeg180(s_fusedYaw + 0.60f * imuErr);
-        float imuRate100ms = constrain(dImu * (100.0f / (float)dtImu), -120.0f, 120.0f);
-        s_fusedRateDeg100ms = 0.55f * imuRate100ms + 0.45f * s_fusedRateDeg100ms;
-        s_fusedLastImuYaw = imuYaw;
-        s_fusedLastImuMs  = now;
-    } else if (dtImu > 35UL) {
-        float imuErr = wrapFusedDeg180(imuYaw - s_fusedYaw);
-        s_fusedYaw = wrapFusedDeg180(s_fusedYaw + 0.30f * imuErr);
-        if (fabsf(dYawEnc) < 0.05f) {
-            s_fusedRateDeg100ms *= 0.60f;
-            if (fabsf(s_fusedRateDeg100ms) < 0.8f) s_fusedRateDeg100ms = 0.0f;
-        }
-        s_fusedLastImuMs = now;
-    }
-
-    outYaw = s_fusedYaw;
-    outRateDeg100ms = s_fusedRateDeg100ms;
-}
-
 void motorWriteSpeedBalanced(int leftCommand, int rightCommand) {
     updateWheelSpeedBalance(leftCommand, rightCommand);
 
@@ -314,32 +215,36 @@ void driveMotors(int leftSpeed, int rightSpeed) {
     safeMotorWrite2(constrain(left, -100, 100), constrain(right, -100, 100));
 }
 
-// ความเร็วที่หุ่น "ยังวิ่งค้างอยู่" ตอนจบคำสั่งก่อนหน้า (บวก = เดินหน้า, ลบ = ถอยหลัง, 0 = หยุดนิ่ง)
-int g_motionCarrySpeed = 0;
-
 void driveStop() {
     safeMotorStop();
     resetMoveSpeedBalance();
-    g_motionCarrySpeed = 0;
 }
 
 // ============================================================================
-// การอ่านระยะ Encoder และแปลงหน่วย CM -> Ticks (อ้างอิงล้อ 3.3 ซม. ตาม Sensor.ino)
+// การอ่านระยะ Encoder และแปลงหน่วย CM -> Ticks (อ้างอิงตาม Sensor.ino ของ PT_MIDDLE_ENC_2026Endcode4MOV1)
 // ============================================================================
 const float ENCODER_WHEEL_DIAMETER_CM = 3.3f;
-const float ENCODER_BASE_TICKS_PER_CM = 1300.0f / (3.14159265f * ENCODER_WHEEL_DIAMETER_CM);
 
 float encoderCountsPerRevolution(int speed) {
-    (void)speed;
+    if (speed < 0) {
+        speed = -speed;
+    }
+    if (speed >= 70) {
+        return 1000.0f;
+    }
+    if (speed >= 50) {
+        return 1200.0f;
+    }
     return 1300.0f;
 }
 
-long encoderCentimetersToTicks(float distanceCm, int speed) {
-    (void)speed;
-    if (distanceCm <= 0.0f) return 0L;
-    float tpcm = max(1.0f, ticksPerCm);
-    float tuneScale = constrain((300.0f + (float)distTuneMm) / 300.0f, 0.50f, 1.50f);
-    return (long)llround((double)distanceCm * (double)tpcm * (double)tuneScale);
+long encoderCentimetersToTicks(float distance_cm, int speed) {
+    if (distance_cm <= 0.0f) {
+        return 0L;
+    }
+    const float wheel_circumference_cm = 3.14159265f * ENCODER_WHEEL_DIAMETER_CM;
+    const float ticks_per_cm = encoderCountsPerRevolution(speed) / wheel_circumference_cm;
+    return (long)roundf(distance_cm * ticks_per_cm);
 }
 
 long readEncoderDistance() {
@@ -347,21 +252,22 @@ long readEncoderDistance() {
     readPtEncoders(c);
     int64_t total = abs64((int64_t)c[0]) + abs64((int64_t)c[1]) +
                     abs64((int64_t)c[2]) + abs64((int64_t)c[3]);
-    return (long)((total + 2LL) / 4LL);
+    return (long)(total / 4LL);
 }
 
-long readEncoderSingleDistance(byte channelEncoder) {
-    if (channelEncoder >= 3) return 0;
+long readEncoderSingleDistance(byte encoder_index) {
+    if (encoder_index + 1 >= 4) {
+        return 0;
+    }
     long c[4];
     readPtEncoders(c);
-    int64_t firstTicks  = abs64((int64_t)c[channelEncoder]);
-    int64_t secondTicks = abs64((int64_t)c[channelEncoder + 1]);
-    return (long)((firstTicks + secondTicks + 1LL) / 2LL);
+    int64_t firstTicks  = abs64((int64_t)c[encoder_index]);
+    int64_t secondTicks = abs64((int64_t)c[encoder_index + 1]);
+    return (long)((firstTicks + secondTicks) / 2LL);
 }
 
 void resetEncoder() {
     resetEncoders();
-    fusedHeadingOnEncoderReset();
     resetMoveSpeedBalance();
 }
 
@@ -388,7 +294,6 @@ void closeDropB() {
 
 void DropF() {
     driveStop();
-    clearTurnDistCarry();
     missionNotifyCommand("DropF();", 11); // CMD_ICON_DROP_F
     setServoAngle(SERVO_S0, frontDrop);
     delay(servoDropDelayMs);
@@ -398,7 +303,6 @@ void DropF() {
 
 void DropB() {
     driveStop();
-    clearTurnDistCarry();
     missionNotifyCommand("DropB();", 12); // CMD_ICON_DROP_B
     setServoAngle(SERVO_S1, backDrop);
     delay(servoDropDelayMs);

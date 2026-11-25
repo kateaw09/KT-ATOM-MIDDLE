@@ -297,6 +297,32 @@
       <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
       <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
     </symbol>
+    <symbol id="ico-plug" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 22v-5" />
+      <path d="M9 8V2" />
+      <path d="M15 8V2" />
+      <path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" />
+    </symbol>
+    <symbol id="ico-external" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+      <polyline points="15 3 21 3 21 9" />
+      <line x1="10" y1="14" x2="21" y2="3" />
+    </symbol>
+    <symbol id="ico-route" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="6" cy="19" r="3" />
+      <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+      <circle cx="18" cy="5" r="3" />
+    </symbol>
+    <symbol id="ico-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
+      <circle cx="12" cy="12" r="3" />
+    </symbol>
+    <symbol id="ico-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" />
+      <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c6.5 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" />
+      <path d="M6.61 6.61A13.53 13.53 0 0 0 2 12s3.5 7 10 7a9.74 9.74 0 0 0 5.39-1.61" />
+      <line x1="2" y1="2" x2="22" y2="22" />
+    </symbol>
   </svg>
 
   <!-- Top Workbench Header -->
@@ -341,6 +367,14 @@
         </button>
         <span class="autosave-status" id="autoSaveStatusText">Synced</span>
       </div>
+
+      <div class="connected-plugin-bar" id="connectedPluginBar" hidden aria-label="แอปเสริมที่เชื่อมต่อ"></div>
+
+      <button class="btn btn-secondary" id="btnOpenPlugins" type="button" title="เชื่อมต่อและจัดการแอปเสริมในโฟลเดอร์ /extentions-plugins">
+        <svg class="svg-ico"><use href="#ico-plug"></use></svg>
+        <span>เชื่อมต่อแอป</span>
+        <span class="badge" id="pluginCountBadge">0</span>
+      </button>
 
       <button class="btn btn-secondary" id="btnOpenVersions" type="button" title="จัดการเวอร์ชัน (Version Control) บันทึกโน้ต แนบรูป และดึงย้อนกลับ (Ctrl+Shift+G)">
         <svg class="svg-ico"><use href="#ico-git"></use></svg>
@@ -1436,7 +1470,7 @@
           <div class="cal-metrics-grid four-col">
             <div class="cal-metric">
               <span class="cal-lbl">ticksPerCm</span>
-              <strong class="cal-val" id="calValTpcm">15.00</strong>
+              <strong class="cal-val" id="calValTpcm">125.40</strong>
             </div>
             <div class="cal-metric">
               <span class="cal-lbl">distTuneMm</span>
@@ -1455,7 +1489,7 @@
           <div class="cal-metrics-grid four-col" style="margin-top:8px;">
             <div class="cal-metric">
               <span class="cal-lbl">spinThr / turnThr</span>
-              <strong class="cal-val" id="calValThresholds">3.5° / 5.0°</strong>
+              <strong class="cal-val" id="calValThresholds">75.0° / 50.0°</strong>
             </div>
             <div class="cal-metric">
               <span class="cal-lbl">Spin Kp / Kd</span>
@@ -1494,12 +1528,18 @@
         <div class="config-list" id="configFormGrid"></div>
       </div>
 
-      <div class="modal-footer">
-        <button class="btn btn-ghost" id="btnCancelConfig" type="button">Cancel</button>
-        <button class="btn btn-primary" id="btnSaveConfig" type="button">
-          <svg class="svg-ico sm"><use href="#ico-save"></use></svg>
-          <span>Save to Config.ino</span>
+      <div class="modal-footer modal-footer-between">
+        <button class="btn btn-secondary" id="btnRestoreDefaultConfig" type="button" title="กู้คืนค่าเริ่มต้น Kp, Kd, Speed และ Threshold ทั้งหมดตามโค้ดหลัก (ไม่ลบค่าคาลิเบรตเซนเซอร์/เซอร์โว)">
+          <svg class="svg-ico sm"><use href="#ico-restore"></use></svg>
+          <span>กู้คืนค่าเริ่มต้น (Kp/Kd)</span>
         </button>
+        <div class="modal-footer-actions">
+          <button class="btn btn-ghost" id="btnCancelConfig" type="button">Cancel</button>
+          <button class="btn btn-primary" id="btnSaveConfig" type="button">
+            <svg class="svg-ico sm"><use href="#ico-save"></use></svg>
+            <span>Save to Config.ino</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -1598,6 +1638,48 @@
         </button>
       </div>
       <img id="lightboxImg" src="" alt="Version attachment preview" />
+    </div>
+  </div>
+
+  <!-- Extension Plugins Connect & Launcher Modal -->
+  <div class="modal-backdrop no-print" id="pluginModal" hidden>
+    <div class="modal-card plugin-modal-card" role="dialog" aria-modal="true" aria-labelledby="pluginModalTitle">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <svg class="svg-ico"><use href="#ico-plug"></use></svg>
+          <div>
+            <h2 id="pluginModalTitle">เชื่อมต่อแอปเสริม (Extension Plugins)</h2>
+            <p class="muted">เลือกเป้าหมายจากโฟลเดอร์ <code>/extentions-plugins</code> — ใช้งานแบบ Offline 100% และซิงค์สนาม-ตำแหน่ง-ความเร็วอัตโนมัติ</p>
+          </div>
+        </div>
+        <div class="modal-head-actions">
+          <span class="badge plugin-offline-pill">Offline 100%</span>
+          <button class="btn btn-xs btn-secondary" id="btnRescanPlugins" type="button" title="สแกนหาแอปเสริมใหม่ในโฟลเดอร์ /extentions-plugins">
+            <svg class="svg-ico sm"><use href="#ico-refresh"></use></svg>
+            <span>สแกนโฟลเดอร์</span>
+          </button>
+          <button class="btn-icon" id="btnClosePluginModal" type="button" title="ปิดหน้าต่าง">
+            <svg class="svg-ico"><use href="#ico-close"></use></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="plugin-modal-body">
+        <div class="plugin-folder-bar">
+          <div class="plugin-folder-info">
+            <span class="muted">โฟลเดอร์เป้าหมาย:</span>
+            <code id="pluginFolderPath">extentions-plugins/</code>
+          </div>
+          <span class="plugin-git-hint">ไม่ถูกเก็บลง Git โดยค่าเริ่มต้น (.gitignore) · วางแอปใหม่เพิ่มได้ทันที</span>
+        </div>
+
+        <div class="plugin-list-grid" id="pluginListContainer"></div>
+
+        <div class="plugin-dev-note">
+          <strong>วิธีเพิ่มแอปเสริมใหม่ในอนาคต:</strong>
+          <span>สร้างโฟลเดอร์ย่อยไว้ใน <code>/extentions-plugins/&lt;app-id&gt;/</code> พร้อมไฟล์ <code>index.html</code> และ <code>plugin.json</code> จากนั้นกด <strong>สแกนโฟลเดอร์</strong> เพื่อเลือกเชื่อมต่อได้ทันที</span>
+        </div>
+      </div>
     </div>
   </div>
 

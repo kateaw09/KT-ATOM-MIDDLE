@@ -1,5 +1,4 @@
 .kt-versions/
-
 .agents/
-
-.kt-versions/
+extentions-plugins/
+.kt-plugins.json

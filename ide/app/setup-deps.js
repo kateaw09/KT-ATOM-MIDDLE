@@ -11,6 +11,7 @@ const IDE_DIR = path.resolve(APP_DIR, '..');
 const TOOLS_DIR = path.join(APP_DIR, 'tools');
 const PTBOT_CORE_ID = 'PTBOT_ESP32:esp32';
 const PTBOT_BOARD_INDEX_URL = 'https://raw.githubusercontent.com/pt-robotics/esp32/refs/heads/main/package_ptbot_index.json';
+const IS_OFFLINE = process.argv.includes('--offline') || process.env.KT_IDE_OFFLINE === '1';
 
 function findSketchDir() {
   const candidates = [
@@ -56,7 +57,7 @@ function findArduinoCli() {
 
 function downloadFile(url, destPath) {
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
+    const req = https.get(url, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         return downloadFile(res.headers.location, destPath).then(resolve, reject);
       }
@@ -67,7 +68,11 @@ function downloadFile(url, destPath) {
       res.pipe(stream);
       stream.on('finish', () => stream.close(() => resolve(destPath)));
       stream.on('error', reject);
-    }).on('error', reject);
+    });
+    req.setTimeout(8000, () => {
+      req.destroy(new Error('Network timeout (offline)'));
+    });
+    req.on('error', reject);
   });
 }
 
@@ -146,6 +151,10 @@ function ensurePtbotCore(cli) {
     console.log('[OK] PTBOT_ESP32:esp32 board core is installed locally (100% offline ready).');
     return true;
   }
+  if (IS_OFFLINE) {
+    console.log(`[INFO] Offline mode — skipping network download for ${PTBOT_CORE_ID}.`);
+    return false;
+  }
 
   console.log('[INFO] PTBOT_ESP32:esp32 board core not found — installing automatically (first-time download)...');
   try {
@@ -161,14 +170,14 @@ function ensurePtbotCore(cli) {
   try {
     execFileSync(cli, ['core', 'update-index', '--additional-urls', PTBOT_BOARD_INDEX_URL], {
       stdio: 'inherit',
-      timeout: 300000
+      timeout: 60000
     });
     execFileSync(cli, ['core', 'install', PTBOT_CORE_ID, '--additional-urls', PTBOT_BOARD_INDEX_URL], {
       stdio: 'inherit',
-      timeout: 600000
+      timeout: 300000
     });
   } catch (err) {
-    console.log(`[WARN] Auto-install of ${PTBOT_CORE_ID} failed (${err.message}).`);
+    console.log(`[WARN] Auto-install of ${PTBOT_CORE_ID} skipped/failed (${err.message}). IDE remains usable offline.`);
   }
 
   if (isPtbotCoreInstalled(cli)) {
@@ -223,18 +232,28 @@ async function main() {
   const sketchDir = findSketchDir();
   console.log(`[SETUP] Sketch Directory: ${sketchDir}`);
 
-  // Ensure local .kt-versions store and .gitignore entry
+  // Ensure local .kt-versions, extentions-plugins store, and .gitignore entries
   const versionsDir = path.join(sketchDir, '.kt-versions');
   fs.mkdirSync(versionsDir, { recursive: true });
+  const pluginsDir = path.join(sketchDir, 'extentions-plugins');
+  fs.mkdirSync(pluginsDir, { recursive: true });
   const gitignorePath = path.join(sketchDir, '.gitignore');
   try {
-    if (fs.existsSync(gitignorePath)) {
-      const content = fs.readFileSync(gitignorePath, 'utf8');
-      if (!content.split(/\r?\n/).some((l) => l.trim() === '.kt-versions/' || l.trim() === '.kt-versions')) {
-        fs.appendFileSync(gitignorePath, `${content.endsWith('\n') ? '' : '\n'}.kt-versions/\n`, 'utf8');
+    const requiredIgnores = ['.kt-versions/', 'extentions-plugins/', '.kt-plugins.json'];
+    let lines = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, 'utf8').split(/\r?\n/) : [];
+    const existingSet = new Set(lines.map((l) => l.trim()).filter(Boolean));
+    let changed = !fs.existsSync(gitignorePath);
+    for (const rule of requiredIgnores) {
+      const bare = rule.replace(/\/$/, '');
+      if (!existingSet.has(rule) && !existingSet.has(bare)) {
+        lines.push(rule);
+        existingSet.add(rule);
+        changed = true;
       }
-    } else {
-      fs.writeFileSync(gitignorePath, '.kt-versions/\n', 'utf8');
+    }
+    if (changed) {
+      const cleaned = lines.filter((l, idx) => idx === 0 || l.trim() !== '' || lines[idx - 1].trim() !== '');
+      fs.writeFileSync(gitignorePath, `${cleaned.join('\n').replace(/\n*$/, '')}\n`, 'utf8');
     }
   } catch (_) {}
 
@@ -248,12 +267,16 @@ async function main() {
 
   let cli = findArduinoCli();
   if (!cli) {
-    console.log('[INFO] arduino-cli not found on host; installing standalone arduino-cli into ide/app/tools ...');
-    try {
-      cli = await installStandaloneArduinoCli();
-    } catch (err) {
-      console.log(`[WARN] Could not auto-download arduino-cli (${err.message}).`);
-      console.log('       Install Arduino IDE 2.x or place arduino-cli in PATH / ide/app/tools to enable compiling.');
+    if (IS_OFFLINE) {
+      console.log('[INFO] Offline mode — skipping standalone arduino-cli download.');
+    } else {
+      console.log('[INFO] arduino-cli not found on host; installing standalone arduino-cli into ide/app/tools ...');
+      try {
+        cli = await installStandaloneArduinoCli();
+      } catch (err) {
+        console.log(`[WARN] Could not auto-download arduino-cli (${err.message}).`);
+        console.log('       Install Arduino IDE 2.x or place arduino-cli in PATH / ide/app/tools to enable compiling.');
+      }
     }
   }
 
