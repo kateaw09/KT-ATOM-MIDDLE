@@ -32,6 +32,9 @@ const CPP_BOOLS = new Set(['true', 'false', 'NULL', 'nullptr', 'HIGH', 'LOW', 'I
 const ROBOT_COMPLETIONS = [
   { label: 'FC', insert: "FC(80, 30.0f, 'R');", sig: "FC(speed, cm [, 'R'|'L'|'r'|'l'|stop [, stopBeforeTurn]])", desc: "เดินหน้า 90° ('R'/'L'=Swing ไม่หยุด, 'r'/'l'=หยุดหมุน Spin 90°, false=ไม่หยุด)", kind: 'API' },
   { label: 'BC', insert: "BC(60, 30.0f, 'L');", sig: "BC(speed, cm [, 'R'|'L'|'r'|'l'|stop [, stopBeforeTurn]])", desc: "ถอยหลัง 90° ('R'/'L'=Swing ไม่หยุด, 'r'/'l'=หยุดหมุน Spin 90°, false=ไม่หยุด)", kind: 'API' },
+  { label: 'FC_BOX', insert: "FC_BOX(65, 1.0f, 'R');", sig: "FC_BOX(speed, boxes [, 'R'|'L'|'r'|'l'|stop [, stopBeforeTurn]])", desc: 'เดินหน้าตามจำนวนช่อง (1–8 ช่อง ใช้ตาราง Box Calibration)', kind: 'API' },
+  { label: 'BC_BOX', insert: "BC_BOX(50, 1.0f, 'L');", sig: "BC_BOX(speed, boxes [, 'R'|'L'|'r'|'l'|stop [, stopBeforeTurn]])", desc: 'ถอยหลังตามจำนวนช่อง (1–8 ช่อง ใช้ตาราง Box Calibration)', kind: 'API' },
+  { label: 'BOX', insert: 'BOX(1)', sig: 'BOX(boxes)', desc: 'แปลงจำนวนช่อง (1–8) เป็นระยะสนามจริง (cm)', kind: 'MATH' },
   { label: 'FC4', insert: "FC4(60, 30.0f, 'R');", sig: "FC4(speed, cm, 'R'|'L'|'r'|'l' [, stopBeforeTurn])", desc: "เดินหน้า 45° ('R'/'L'=Swing ไม่หยุด, 'r'/'l'=หยุดหมุน Spin 45°)", kind: 'API' },
   { label: 'BC4', insert: "BC4(50, 20.0f, 'L');", sig: "BC4(speed, cm, 'R'|'L'|'r'|'l' [, stopBeforeTurn])", desc: "ถอยหลัง 45° ('R'/'L'=Swing ไม่หยุด, 'r'/'l'=หยุดหมุน Spin 45°)", kind: 'API' },
   { label: 'SpinDegree', insert: 'SpinDegree(90.0f);', sig: 'SpinDegree(degree)', desc: 'หมุนอยู่กับที่ตามมุม Gyro (+ ขวา / - ซ้าย)', kind: 'API' },

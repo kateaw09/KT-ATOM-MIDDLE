@@ -894,7 +894,7 @@ static void screenTest90cmRun() {
         driveStop();
         resetTargetYaw();
         resetEncoder(); // รีเซ็ต Ticks = 0 ก่อนออกตัวทดสอบทุกครั้ง
-        long targetTicks = encoderCentimetersToTicks(CAL_TEST_DISTANCE_CM, testSpeed);
+        long targetTicks = encoderCentimetersToTicks(mapFieldCmToRobotCm(CAL_TEST_DISTANCE_CM), testSpeed);
         unsigned long tRunStart = millis();
         FC(testSpeed, CAL_TEST_DISTANCE_CM, true); // วิ่งตรงจริงที่ความเร็วสูงสุด 90 ซม. แล้วตัดมอเตอร์ทันที (ไม่เลี้ยวต่อ)
         driveStop();

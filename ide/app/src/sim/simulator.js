@@ -14,6 +14,28 @@ export function getCalTuneScale(cal) {
   return Math.min(1.5, Math.max(0.5, (300.0 + distMm) / 300.0));
 }
 
+export function mapFieldCmToRobotCm(fieldCm, config = {}) {
+  const d = Number(fieldCm) || 0;
+  if (d <= 0) return 0;
+  if (config?.enableBoxDistCal === false) return d;
+  const tile = Math.max(5, Number(config?.boxTileCm) || 30);
+  const pts = [0];
+  for (let i = 1; i <= 8; i++) {
+    const raw = Number(config?.[`box${i}Cm`]);
+    pts.push(Number.isFinite(raw) ? Math.max(0, raw) : i * tile);
+  }
+  const boxF = d / tile;
+  if (boxF >= 8) {
+    let slope = pts[8] - pts[7];
+    if (slope <= 0.5) slope = tile;
+    return Math.max(0, pts[8] + (boxF - 8) * slope);
+  }
+  const idx = Math.max(0, Math.min(7, Math.floor(boxF)));
+  const frac = boxF - idx;
+  const mapped = pts[idx] + frac * (pts[idx + 1] - pts[idx]);
+  return mapped > 0 ? mapped : 0;
+}
+
 export function encoderCentimetersToTicks(distanceCm, speed, cal) {
   if (distanceCm <= 0) return 0;
   const tpcm = Math.max(1.0, Number(cal.tpcm) || 15.0);
@@ -23,7 +45,7 @@ export function encoderCentimetersToTicks(distanceCm, speed, cal) {
 }
 
 export function getCalibratedSpeedCmPerSec(speed, cal) {
-  const spd = Math.max(15, Math.min(100, Math.abs(Number(speed) || 45)));
+  const spd = Math.max(1, Math.min(100, Math.abs(Number(speed) || 45)));
   const calMs = Math.max(150, Number(cal.calms) || 1150);
   const refCmPs = 30000.0 / calMs;
   return refCmPs * (spd / 45.0);
@@ -111,7 +133,7 @@ export function buildSimSegments(state, overrideOpts = null) {
   const enableComp = state.config?.enableTurnDistComp !== false;
   const innerRatio = Math.max(0, Math.min(0.85, Number(state.config?.turnInnerRatio) || 0));
   const innerScale = innerRatio > 0.01 ? (1 + innerRatio) / (1 - innerRatio) : 1;
-  const baseTurnRadius = Math.max(2.5, Number(state.config?.turnExitRadiusCm) || 6.3);
+  const baseTurnRadius = Math.max(2.5, Number(state.config?.turnExitRadiusCm) || 5.8);
   const effTurnRadius = Math.min(22, baseTurnRadius * innerScale);
   const turnFrontSpd = Number(state.config?.turnFrontMaxSpeed) || 80;
   const turnBackSpd = Number(state.config?.turnBackMaxSpeed) || 80;
@@ -137,42 +159,46 @@ export function buildSimSegments(state, overrideOpts = null) {
   let calibratedCm = 0;
   let totalTicks = 0;
   let totalMs = 0;
+  const boxUnitCm = Math.max(5, Number(state.config?.boxTileCm) || grid.cellCm || 30);
+  const evalCtx = { boxTileCm: boxUnitCm };
 
   const consumeCarryWorldCm = (rawCm, forward, entryCompWorldCm = 0) => {
     const carry = enableComp ? turnExitCarryCm : 0;
     turnExitCarryCm = 0;
     const signedPrev = forward ? carry : -carry;
-    const adj = rawCm * tuneScale - signedPrev - entryCompWorldCm;
+    const adj = rawCm - signedPrev - entryCompWorldCm;
     return Math.max(0, adj);
   };
 
   const pushMoveWorld = (blockIdx, signedWorldCm, speed, label, marker = null, applyEncoderCal = true, rawNominalAbsCm = null) => {
-    const absWorldCm = Math.abs(signedWorldCm);
-    const nomCm = rawNominalAbsCm !== null ? Math.abs(rawNominalAbsCm) : (applyEncoderCal ? absWorldCm / Math.max(0.01, tuneScale) : absWorldCm);
-    const ticks = applyEncoderCal ? encoderCentimetersToTicks(nomCm, speed, cal) : 0;
+    const fieldAbsCm = Math.abs(signedWorldCm);
+    const nomCm = rawNominalAbsCm !== null ? Math.abs(rawNominalAbsCm) : fieldAbsCm;
+    const mappedRobotCm = applyEncoderCal ? mapFieldCmToRobotCm(fieldAbsCm, state.config) : fieldAbsCm;
+    const effRobotCm = applyEncoderCal ? mappedRobotCm * tuneScale : fieldAbsCm;
+    const ticks = applyEncoderCal ? encoderCentimetersToTicks(mappedRobotCm, speed, cal) : 0;
     const driftDeg = applyEncoderCal ? 0 : trim * 0.25;
     const rad = ((h + driftDeg) * Math.PI) / 180;
     const nx = x + Math.sin(rad) * signedWorldCm;
     const ny = y - Math.cos(rad) * signedWorldCm;
     const velCmPs = getCalibratedSpeedCmPerSec(speed, cal);
-    const dur = Math.max(100, (absWorldCm / Math.max(1, velCmPs)) * 1000);
+    const dur = Math.max(100, (effRobotCm / Math.max(1, velCmPs)) * 1000);
 
     nominalCm += nomCm;
-    calibratedCm += absWorldCm;
+    calibratedCm += effRobotCm;
     totalTicks += ticks;
     totalMs += dur;
 
     segments.push({
       blockIdx, fx: x, fy: y, fh: h, tx: nx, ty: ny, th: h,
-      startMs: totalMs - dur, endMs: totalMs, speedCmPs: velCmPs, label, ticks, effCm: signedWorldCm, dur, marker
+      startMs: totalMs - dur, endMs: totalMs, speedCmPs: velCmPs, label, ticks,
+      effCm: Math.sign(signedWorldCm || 1) * effRobotCm, fieldCm: signedWorldCm, dur, marker
     });
     x = nx;
     y = ny;
   };
 
   const pushMove = (blockIdx, distCm, speed, label, marker = null, applyEncoderCal = true) => {
-    const signedWorldCm = applyEncoderCal ? distCm * tuneScale : distCm;
-    pushMoveWorld(blockIdx, signedWorldCm, speed, label, marker, applyEncoderCal, Math.abs(distCm));
+    pushMoveWorld(blockIdx, distCm, speed, label, marker, applyEncoderCal, Math.abs(distCm));
   };
 
   const pushTurn = (blockIdx, deg, label, isSwing = false) => {
@@ -236,53 +262,71 @@ export function buildSimSegments(state, overrideOpts = null) {
 
   expandedBlocks.forEach(({ block: b, idx }) => {
     const p = b.params || {};
-    const spd = evalExpression(p.speed, vars, 60);
-    const cm = evalExpression(p.cm, vars, 30);
+    const spd = evalExpression(p.speed, vars, 60, evalCtx);
+    const cm = evalExpression(p.cm, vars, 30, evalCtx);
     switch (b.type) {
-      case 'FC_SIMPLE': {
-        const straightWorld = enableComp ? consumeCarryWorldCm(cm, true, 0) : cm * tuneScale;
+      case 'FC_SIMPLE':
+      case 'FC_BOX_SIMPLE': {
+        const isBox = b.type === 'FC_BOX_SIMPLE';
+        const boxes = isBox ? evalExpression(p.boxes, vars, 1, evalCtx) : 0;
+        const moveCm = isBox ? Math.max(0, boxes * boxUnitCm) : cm;
+        const straightWorld = enableComp ? consumeCarryWorldCm(moveCm, true, 0) : moveCm;
         turnExitCarryCm = 0;
-        if (straightWorld > 0.05) pushMoveWorld(idx, straightWorld, spd, `FC ${cm.toFixed(0)}cm`, null, true, cm);
+        const lbl = isBox ? `FC_BOX ${boxes}b (${moveCm.toFixed(0)}cm)` : `FC ${cm.toFixed(0)}cm`;
+        if (straightWorld > 0.05) pushMoveWorld(idx, straightWorld, spd, lbl, null, true, straightWorld);
         break;
       }
-      case 'BC_SIMPLE': {
-        const straightWorld = enableComp ? consumeCarryWorldCm(cm, false, 0) : cm * tuneScale;
+      case 'BC_SIMPLE':
+      case 'BC_BOX_SIMPLE': {
+        const isBox = b.type === 'BC_BOX_SIMPLE';
+        const boxes = isBox ? evalExpression(p.boxes, vars, 1, evalCtx) : 0;
+        const moveCm = isBox ? Math.max(0, boxes * boxUnitCm) : cm;
+        const straightWorld = enableComp ? consumeCarryWorldCm(moveCm, false, 0) : moveCm;
         turnExitCarryCm = 0;
-        if (straightWorld > 0.05) pushMoveWorld(idx, -straightWorld, spd, `BC ${cm.toFixed(0)}cm`, null, true, cm);
+        const lbl = isBox ? `BC_BOX ${boxes}b (${moveCm.toFixed(0)}cm)` : `BC ${cm.toFixed(0)}cm`;
+        if (straightWorld > 0.05) pushMoveWorld(idx, -straightWorld, spd, lbl, null, true, straightWorld);
         break;
       }
       case 'FC_DIR':
       case 'BC_DIR':
+      case 'FC_BOX_DIR':
+      case 'BC_BOX_DIR':
       case 'FC4':
       case 'BC4': {
-        const forward = b.type === 'FC_DIR' || b.type === 'FC4';
+        const isBox = b.type === 'FC_BOX_DIR' || b.type === 'BC_BOX_DIR';
+        const forward = b.type === 'FC_DIR' || b.type === 'FC_BOX_DIR' || b.type === 'FC4';
         const is45 = b.type === 'FC4' || b.type === 'BC4';
+        const boxes = isBox ? evalExpression(p.boxes, vars, 1, evalCtx) : 0;
+        const moveCm = isBox ? Math.max(0, boxes * boxUnitCm) : cm;
         const d = resolveDirValue(p.dir, vars);
         const mag = is45 ? 45 : 90;
         const ang = (d === 'L' || d === 'l') ? -mag : mag;
         const isSwing = (d === 'L' || d === 'R');
-        const prefix = b.type === 'FC4' ? 'FC4' : b.type === 'BC4' ? 'BC4' : (forward ? 'FC' : 'BC');
+        const prefix = isBox
+          ? (forward ? 'FC_BOX' : 'BC_BOX')
+          : (b.type === 'FC4' ? 'FC4' : b.type === 'BC4' ? 'BC4' : (forward ? 'FC' : 'BC'));
+        const amtLbl = isBox ? `${boxes}b` : `${moveCm.toFixed(0)}cm`;
 
         if (isSwing) {
           const tanHalf = Math.tan((Math.min(135, Math.max(5, Math.abs(ang))) * 0.5 * Math.PI) / 180);
           const prevCarrySigned = enableComp ? (forward ? turnExitCarryCm : -turnExitCarryCm) : 0;
-          const availWorld = Math.max(0, cm * tuneScale - prevCarrySigned);
-          const arcR = (enableComp && cm > 0.1)
+          const availWorld = Math.max(0, moveCm - prevCarrySigned);
+          const arcR = (enableComp && moveCm > 0.1)
             ? Math.min(effTurnRadius, Math.max(2.0, (availWorld * 0.85) / Math.max(0.2, tanHalf)))
             : effTurnRadius;
           const entryComp = enableComp ? Math.min(availWorld, arcR * tanHalf) : 0;
-          const straightWorld = enableComp ? consumeCarryWorldCm(cm, forward, entryComp) : cm * tuneScale;
+          const straightWorld = enableComp ? consumeCarryWorldCm(moveCm, forward, entryComp) : moveCm;
           if (straightWorld > 0.05) {
-            pushMoveWorld(idx, forward ? straightWorld : -straightWorld, spd, `${prefix} ${cm.toFixed(0)}cm`, null, true, straightWorld / Math.max(0.01, tuneScale));
+            pushMoveWorld(idx, forward ? straightWorld : -straightWorld, spd, `${prefix} ${amtLbl}`, null, true, straightWorld);
           }
           const turnLabel = is45 ? `45° Turn '${d}'` : `Turn '${d}'`;
           pushArcTurn(idx, ang, arcR, forward ? 1 : -1, spd || (forward ? turnFrontSpd : turnBackSpd), turnLabel);
           turnExitCarryCm = enableComp ? (forward ? arcR * tanHalf : -arcR * tanHalf) : 0;
         } else {
-          const straightWorld = enableComp ? consumeCarryWorldCm(cm, forward, 0) : cm * tuneScale;
+          const straightWorld = enableComp ? consumeCarryWorldCm(moveCm, forward, 0) : moveCm;
           turnExitCarryCm = 0;
           if (straightWorld > 0.05) {
-            pushMoveWorld(idx, forward ? straightWorld : -straightWorld, spd, `${prefix} ${cm.toFixed(0)}cm`, null, true, straightWorld / Math.max(0.01, tuneScale));
+            pushMoveWorld(idx, forward ? straightWorld : -straightWorld, spd, `${prefix} ${amtLbl}`, null, true, straightWorld);
           }
           pushTurn(idx, ang, is45 ? `45° Spin '${d}'` : `Spin '${d}'`, false);
         }
@@ -290,31 +334,31 @@ export function buildSimSegments(state, overrideOpts = null) {
       }
       case 'SPIN': {
         turnExitCarryCm = 0;
-        const deg = evalExpression(p.deg, vars, 90);
+        const deg = evalExpression(p.deg, vars, 90, evalCtx);
         pushTurn(idx, deg, `SPIN ${deg}°`, false);
         break;
       }
       case 'TURN_F': {
         turnExitCarryCm = 0;
-        const deg = evalExpression(p.deg, vars, 90);
+        const deg = evalExpression(p.deg, vars, 90, evalCtx);
         pushArcTurn(idx, deg, effTurnRadius, 1, turnFrontSpd, `TurnF ${deg}°`);
         break;
       }
       case 'TURN_B': {
         turnExitCarryCm = 0;
-        const deg = evalExpression(p.deg, vars, 90);
+        const deg = evalExpression(p.deg, vars, 90, evalCtx);
         pushArcTurn(idx, deg, effTurnRadius, -1, turnBackSpd, `TurnB ${deg}°`);
         break;
       }
       case 'TTF90':
       case 'TTF45': {
         turnExitCarryCm = 0;
-        const sL = evalExpression(p.spdL, vars, 80);
-        const sR = evalExpression(p.spdR, vars, 25);
+        const sL = evalExpression(p.spdL, vars, 80, evalCtx);
+        const sR = evalExpression(p.spdR, vars, 25, evalCtx);
         const ang = b.type === 'TTF90' ? 90 : 45;
         const delta = sL < sR ? -ang : ang;
         const spdMax = Math.max(Math.abs(sL), Math.abs(sR));
-        const arcR = Math.max(2.5, (cm * tuneScale) / ((Math.abs(delta) * Math.PI) / 180));
+        const arcR = Math.max(2.5, cm / ((Math.abs(delta) * Math.PI) / 180));
         const ticks = encoderCentimetersToTicks(cm, spdMax, cal);
         pushArcTurn(idx, delta, arcR, 1, spdMax, b.type, { rawNominalCm: cm, ticks });
         break;
@@ -322,25 +366,25 @@ export function buildSimSegments(state, overrideOpts = null) {
       case 'TTB90':
       case 'TTB45': {
         turnExitCarryCm = 0;
-        const sL = evalExpression(p.spdL, vars, 25);
-        const sR = evalExpression(p.spdR, vars, 80);
+        const sL = evalExpression(p.spdL, vars, 25, evalCtx);
+        const sR = evalExpression(p.spdR, vars, 80, evalCtx);
         const ang = b.type === 'TTB90' ? 90 : 45;
         const delta = sL < sR ? ang : -ang;
         const spdMax = Math.max(Math.abs(sL), Math.abs(sR));
-        const arcR = Math.max(2.5, (cm * tuneScale) / ((Math.abs(delta) * Math.PI) / 180));
+        const arcR = Math.max(2.5, cm / ((Math.abs(delta) * Math.PI) / 180));
         const ticks = encoderCentimetersToTicks(cm, spdMax, cal);
         pushArcTurn(idx, delta, arcR, -1, spdMax, b.type, { rawNominalCm: cm, ticks });
         break;
       }
       case 'FF_TIME': {
         turnExitCarryCm = 0;
-        const ms = evalExpression(p.ms, vars, 400);
+        const ms = evalExpression(p.ms, vars, 400, evalCtx);
         pushMove(idx, (getCalibratedSpeedCmPerSec(spd, cal) * ms) / 1000, spd, `FF ${ms}ms`, null, false);
         break;
       }
       case 'BB_TIME': {
         turnExitCarryCm = 0;
-        const ms = evalExpression(p.ms, vars, 400);
+        const ms = evalExpression(p.ms, vars, 400, evalCtx);
         pushMove(idx, -(getCalibratedSpeedCmPerSec(spd, cal) * ms) / 1000, spd, `BB ${ms}ms`, null, false);
         break;
       }
@@ -349,7 +393,7 @@ export function buildSimSegments(state, overrideOpts = null) {
       case 'SETF_DIR': {
         const approachCm = Math.max(grid.cellCm * 0.1, grid.cellCm * 0.4 - (enableComp ? turnExitCarryCm : 0));
         turnExitCarryCm = 0;
-        const backCm = evalExpression(p.cm, vars, 0);
+        const backCm = evalExpression(p.cm, vars, 0, evalCtx);
         const d = p.dir ? resolveDirValue(p.dir, vars) : '';
         pushMove(idx, approachCm, spd, 'SetF Align', 'line');
         if (backCm) pushMove(idx, -backCm, spd, `Back ${backCm}cm`);
@@ -361,7 +405,7 @@ export function buildSimSegments(state, overrideOpts = null) {
       case 'SETB_DIR': {
         const approachCm = Math.max(grid.cellCm * 0.1, grid.cellCm * 0.4 + (enableComp ? turnExitCarryCm : 0));
         turnExitCarryCm = 0;
-        const fwdCm = evalExpression(p.cm, vars, 0);
+        const fwdCm = evalExpression(p.cm, vars, 0, evalCtx);
         const d = p.dir ? resolveDirValue(p.dir, vars) : '';
         pushMove(idx, -approachCm, spd, 'SetB Align', 'line');
         if (fwdCm) pushMove(idx, fwdCm, spd, `Fwd ${fwdCm}cm`);
@@ -386,15 +430,17 @@ export function buildSimSegments(state, overrideOpts = null) {
       }
       case 'DROPF':
       case 'DROPB':
+        turnExitCarryCm = 0;
         totalMs += 300;
         segments.push({ blockIdx: idx, fx: x, fy: y, fh: h, tx: x, ty: y, th: h, startMs: totalMs - 300, endMs: totalMs, speedCmPs: 0, label: b.type, ticks: 0, effCm: 0, dur: 300, marker: 'drop' });
         break;
       case 'STOP':
+        turnExitCarryCm = 0;
         totalMs += 250;
         segments.push({ blockIdx: idx, fx: x, fy: y, fh: h, tx: x, ty: y, th: h, startMs: totalMs - 250, endMs: totalMs, speedCmPs: 0, label: 'STOP()', ticks: 0, effCm: 0, dur: 250, marker: 'pause' });
         break;
       case 'DELAY': {
-        const dMs = Math.max(50, evalExpression(p.ms, vars, 250));
+        const dMs = Math.max(50, evalExpression(p.ms, vars, 250, evalCtx));
         totalMs += dMs;
         segments.push({ blockIdx: idx, fx: x, fy: y, fh: h, tx: x, ty: y, th: h, startMs: totalMs - dMs, endMs: totalMs, speedCmPs: 0, label: `delay ${dMs}ms`, ticks: 0, effCm: 0, dur: dMs, marker: 'pause' });
         break;
@@ -580,7 +626,12 @@ export function renderSimToTarget(state, canvas, teleIds = null, overrideOpts = 
   const teleTile = teleIds?.tile ? document.getElementById(teleIds.tile) : null;
   if (teleStep) teleStep.textContent = curLabel;
   if (telePose) telePose.textContent = `${state.sim.robotX.toFixed(1)}, ${state.sim.robotY.toFixed(1)} cm · ${normHeading}°${zNote}`;
-  if (teleClock) teleClock.textContent = `${stats.calibratedCm.toFixed(1)} cm (${stats.totalTicks} t) · ${elapsedSec.toFixed(2)}s / ${stats.estSec.toFixed(2)}s`;
+  if (teleClock) {
+    const hasCalDiff = Math.abs(stats.calibratedCm - stats.nominalCm) >= 0.15;
+    teleClock.textContent = hasCalDiff
+      ? `${stats.nominalCm.toFixed(1)} cm -> Robot ${stats.calibratedCm.toFixed(1)} cm (${stats.totalTicks} t) · ${elapsedSec.toFixed(2)}s / ${stats.estSec.toFixed(2)}s`
+      : `${stats.nominalCm.toFixed(1)} cm (${stats.totalTicks} t) · ${elapsedSec.toFixed(2)}s / ${stats.estSec.toFixed(2)}s`;
+  }
 
   if (teleTile) {
     if (hasFieldGrid) {

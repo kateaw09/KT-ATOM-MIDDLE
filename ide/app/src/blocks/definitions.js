@@ -140,6 +140,66 @@ export function buildCommandDefs(getVariables) {
       toCode: (p) => `BC4(${intLit(p.speed)}, ${floatLit(p.cm)}, ${charLit(p.dir)});`
     },
     {
+      type: 'FC_BOX_SIMPLE',
+      cat: 'enc',
+      title: 'FC_BOX',
+      sig: 'FC_BOX(speed, boxes)',
+      desc: 'เดินหน้าตามจำนวนช่อง (1–8 ช่อง ใช้ตาราง Box Calibration)',
+      defaults: { speed: 65, boxes: 1, stop: true },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'boxes', label: 'box', type: 'number' },
+        { key: 'stop', label: 'stop', type: 'bool' }
+      ],
+      toCode: (p) => (p.stop === true || p.stop === 'true'
+        ? `FC_BOX(${intLit(p.speed)}, ${floatLit(p.boxes)});`
+        : `FC_BOX(${intLit(p.speed)}, ${floatLit(p.boxes)}, ${boolLit(p.stop)});`)
+    },
+    {
+      type: 'BC_BOX_SIMPLE',
+      cat: 'enc',
+      title: 'BC_BOX',
+      sig: 'BC_BOX(speed, boxes)',
+      desc: 'ถอยหลังตามจำนวนช่อง (1–8 ช่อง ใช้ตาราง Box Calibration)',
+      defaults: { speed: 50, boxes: 1, stop: true },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'boxes', label: 'box', type: 'number' },
+        { key: 'stop', label: 'stop', type: 'bool' }
+      ],
+      toCode: (p) => (p.stop === true || p.stop === 'true'
+        ? `BC_BOX(${intLit(p.speed)}, ${floatLit(p.boxes)});`
+        : `BC_BOX(${intLit(p.speed)}, ${floatLit(p.boxes)}, ${boolLit(p.stop)});`)
+    },
+    {
+      type: 'FC_BOX_DIR',
+      cat: 'enc',
+      title: 'FC_BOX',
+      sig: "FC_BOX(speed, boxes, 'R')",
+      desc: "เดินหน้าตามจำนวนช่องแล้วเลี้ยว/หมุน 90° ('L'/'R'=Swing, 'l'/'r'=Spin)",
+      defaults: { speed: 65, boxes: 1, dir: 'R' },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'boxes', label: 'box', type: 'number' },
+        { key: 'dir', label: 'dir', type: 'dirTurn90' }
+      ],
+      toCode: (p) => `FC_BOX(${intLit(p.speed)}, ${floatLit(p.boxes)}, ${charLit(p.dir)});`
+    },
+    {
+      type: 'BC_BOX_DIR',
+      cat: 'enc',
+      title: 'BC_BOX',
+      sig: "BC_BOX(speed, boxes, 'L')",
+      desc: "ถอยหลังตามจำนวนช่องแล้วเลี้ยว/หมุน 90° ('L'/'R'=Swing, 'l'/'r'=Spin)",
+      defaults: { speed: 50, boxes: 1, dir: 'L' },
+      fields: [
+        { key: 'speed', label: 'spd', type: 'number' },
+        { key: 'boxes', label: 'box', type: 'number' },
+        { key: 'dir', label: 'dir', type: 'dirTurn90' }
+      ],
+      toCode: (p) => `BC_BOX(${intLit(p.speed)}, ${floatLit(p.boxes)}, ${charLit(p.dir)});`
+    },
+    {
       type: 'SPIN',
       cat: 'spin',
       title: 'SpinDegree',
@@ -432,6 +492,22 @@ export function buildCommandDefs(getVariables) {
 
 export const DEFAULT_MOTION_CONFIG = {
   useCodeMotionDefaults: true,
+  enableBoxDistCal: true,
+  boxTileCm: 30.0,
+  box1Cm: 30.0,
+  box2Cm: 60.0,
+  box3Cm: 90.0,
+  box4Cm: 120.0,
+  box5Cm: 150.0,
+  box6Cm: 180.0,
+  box7Cm: 210.0,
+  box8Cm: 240.0,
+  enableSpeedInvariantDist: true,
+  moveAccelRate: 260.0,
+  moveDecelRate: 260.0,
+  moveArriveSpeed: 15,
+  motorMinMoveSpeed: 12,
+  enableEndPositionTrim: false,
   fwdKp: 1.2,
   fwdKd: 15.0,
   bwdKp: 1.2,
@@ -460,13 +536,15 @@ export const DEFAULT_MOTION_CONFIG = {
   smallAngle_turnDegree: 50.0,
   turnRightOffsetDeg: 0.0,
   enableTurnDistComp: false,
-  turnEntryCompCm: 6.8,
-  turnExitRadiusCm: 6.3,
+  turnEntryCompCm: 8.0,
+  turnExitRadiusCm: 5.8,
   servoDropDelayMs: 200
 };
 
 export const CONFIG_SECTIONS = [
   { id: 'mode', title: 'โหมดการทำงานเริ่มต้น (Boot & Run Mode)' },
+  { id: 'boxDist', title: 'ตารางระยะเดินตามช่อง 1–8 ช่อง (Box Distance Calibration)' },
+  { id: 'speedInvariant', title: 'คุมระยะคงที่ทุกความเร็ว 1–100 (Speed-Invariant Motion)' },
   { id: 'pd', title: 'จูนความตรง Gyro PD (เดินหน้า / ถอยหลัง)' },
   { id: 'spin', title: 'จูนการหมุนอยู่กับที่และเลี้ยว Pivot (Gyro Spin & Turn)' },
   { id: 'turnComp', title: 'ชดเชยระยะเข้า-ออกโค้งอัตโนมัติ (Swing Turn Distance Comp)' },
@@ -478,6 +556,22 @@ export const CONFIG_FIELDS = [
   { section: 'mode', key: 'enableMultiMode', label: 'enableMultiMode', hint: 'เปิดให้กดปุ่ม B สลับโหมด RunMode 1-3 บนตัวหุ่น', type: 'bool', default: true },
   { section: 'mode', key: 'currentRunMode', label: 'currentRunMode', hint: 'โหมดภารกิจเริ่มต้นเมื่อเปิดเครื่อง (1 - 3)', type: 'number', min: 1, max: 3, default: 1 },
   { section: 'mode', key: 'useCodeMotionDefaults', label: 'useCodeMotionDefaults', hint: 'ใช้ค่าเริ่มต้นจากโค้ด Config.ino (ซิงค์กับ enableCodeMotionDefaults() ใน setup()) และล็อก Auto Tune ใน Assembly', type: 'bool', default: DEFAULT_MOTION_CONFIG.useCodeMotionDefaults },
+  { section: 'boxDist', key: 'enableBoxDistCal', label: 'enableBoxDistCal', hint: 'เปิดใช้ตารางแปลงระยะ 1–8 ช่องบนตัวหุ่น (Simulator ยังเดินตามระยะสนามจริงเสมอ)', type: 'bool', default: DEFAULT_MOTION_CONFIG.enableBoxDistCal },
+  { section: 'boxDist', key: 'boxTileCm', label: 'boxTileCm', hint: 'ความยาวมาตรฐาน 1 ช่องสนามสำหรับอ้างอิงและ BOX(n) (ซม.)', type: 'number', min: 5, max: 200, step: 0.5, default: DEFAULT_MOTION_CONFIG.boxTileCm },
+  { section: 'boxDist', boxNum: 1, key: 'box1Cm', label: 'box1Cm', hint: '1 ช่อง (สนาม 30 cm)', type: 'number', min: 1, max: 500, step: 0.5, default: DEFAULT_MOTION_CONFIG.box1Cm },
+  { section: 'boxDist', boxNum: 2, key: 'box2Cm', label: 'box2Cm', hint: '2 ช่อง (สนาม 60 cm)', type: 'number', min: 1, max: 500, step: 0.5, default: DEFAULT_MOTION_CONFIG.box2Cm },
+  { section: 'boxDist', boxNum: 3, key: 'box3Cm', label: 'box3Cm', hint: '3 ช่อง (สนาม 90 cm)', type: 'number', min: 1, max: 500, step: 0.5, default: DEFAULT_MOTION_CONFIG.box3Cm },
+  { section: 'boxDist', boxNum: 4, key: 'box4Cm', label: 'box4Cm', hint: '4 ช่อง (สนาม 120 cm)', type: 'number', min: 1, max: 500, step: 0.5, default: DEFAULT_MOTION_CONFIG.box4Cm },
+  { section: 'boxDist', boxNum: 5, key: 'box5Cm', label: 'box5Cm', hint: '5 ช่อง (สนาม 150 cm)', type: 'number', min: 1, max: 500, step: 0.5, default: DEFAULT_MOTION_CONFIG.box5Cm },
+  { section: 'boxDist', boxNum: 6, key: 'box6Cm', label: 'box6Cm', hint: '6 ช่อง (สนาม 180 cm)', type: 'number', min: 1, max: 500, step: 0.5, default: DEFAULT_MOTION_CONFIG.box6Cm },
+  { section: 'boxDist', boxNum: 7, key: 'box7Cm', label: 'box7Cm', hint: '7 ช่อง (สนาม 210 cm)', type: 'number', min: 1, max: 500, step: 0.5, default: DEFAULT_MOTION_CONFIG.box7Cm },
+  { section: 'boxDist', boxNum: 8, key: 'box8Cm', label: 'box8Cm', hint: '8 ช่อง (สนาม 240 cm)', type: 'number', min: 1, max: 500, step: 0.5, default: DEFAULT_MOTION_CONFIG.box8Cm },
+  { section: 'speedInvariant', key: 'enableSpeedInvariantDist', label: 'enableSpeedInvariantDist', hint: 'คุมระยะให้เท่ากันทุกความเร็ว 1–100 (โค้งเร่ง/ชะลอ + Anti-Stall + Active Brake)', type: 'bool', default: DEFAULT_MOTION_CONFIG.enableSpeedInvariantDist },
+  { section: 'speedInvariant', key: 'moveAccelRate', label: 'moveAccelRate', hint: 'อัตราเร่งออกตัวลดล้อฟรี (speed²/cm)', type: 'number', min: 50, max: 2000, step: 10, default: DEFAULT_MOTION_CONFIG.moveAccelRate },
+  { section: 'speedInvariant', key: 'moveDecelRate', label: 'moveDecelRate', hint: 'อัตราหน่วงชะลอเข้าเป้า (speed²/cm) — ยิ่งน้อยยิ่งเริ่มชะลอเร็วและหยุดนิ่งขึ้น', type: 'number', min: 50, max: 2000, step: 10, default: DEFAULT_MOTION_CONFIG.moveDecelRate },
+  { section: 'speedInvariant', key: 'moveArriveSpeed', label: 'moveArriveSpeed', hint: 'ความเร็วเข้าเป้าก่อนเบรก (1–40) — ทุกความเร็วจะลดมาเท่านี้ก่อนหยุด', type: 'number', min: 1, max: 60, step: 1, default: DEFAULT_MOTION_CONFIG.moveArriveSpeed },
+  { section: 'speedInvariant', key: 'motorMinMoveSpeed', label: 'motorMinMoveSpeed', hint: 'ความเร็วขั้นต่ำที่ล้อเริ่มหมุนจริง (Anti-Stall สำหรับสั่งความเร็ว 1–15)', type: 'number', min: 1, max: 40, step: 1, default: DEFAULT_MOTION_CONFIG.motorMinMoveSpeed },
+  { section: 'speedInvariant', key: 'enableEndPositionTrim', label: 'enableEndPositionTrim', hint: 'เติมระยะเดินหน้าเพิ่มด้วย Encoder เฉพาะกรณีหยุดขาด (ไม่ถอยหลัง)', type: 'bool', default: DEFAULT_MOTION_CONFIG.enableEndPositionTrim },
   { section: 'pd', key: 'fwdKp', label: 'fwdKp', hint: 'สัดส่วนชดเชยความเอียงเดินหน้า FFE (Kp)', type: 'number', step: 0.05, default: DEFAULT_MOTION_CONFIG.fwdKp },
   { section: 'pd', key: 'fwdKd', label: 'fwdKd', hint: 'ตัวหน่วงลดส่ายเดินหน้า FFE (Kd)', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.fwdKd },
   { section: 'pd', key: 'bwdKp', label: 'bwdKp', hint: 'สัดส่วนชดเชยความเอียงถอยหลัง BBE (Kp)', type: 'number', step: 0.05, default: DEFAULT_MOTION_CONFIG.bwdKp },
@@ -521,6 +615,10 @@ export const CONFIG_FIELDS = [
 ];
 
 export const SNIPPETS = [
+  { code: "FC_BOX(65, 2.0f, 'R');", desc: 'เดินหน้า 2 ช่อง (ใช้ตาราง 1-8 ช่อง) แล้ว Swing ขวา 90°' },
+  { code: 'FC_BOX(65, 3.0f);', desc: 'เดินหน้า 3 ช่องแล้วหยุด (ปรับระยะใน Config)' },
+  { code: 'BC_BOX(50, 1.0f);', desc: 'ถอยหลัง 1 ช่องแล้วหยุด' },
+  { code: "FC(65, BOX(2), 'R');", desc: 'เดินหน้า 2 ช่องด้วย BOX(2) แล้ว Swing ขวา 90°' },
   { code: "FC(80, 30.0f, 'R');", desc: 'เดินหน้า 30 cm แล้ว Swing ขวา 90° (ไม่หยุด)' },
   { code: "FC(80, 30.0f, 'L');", desc: 'เดินหน้า 30 cm แล้ว Swing ซ้าย 90° (ไม่หยุด)' },
   { code: "FC(80, 30.0f, 'r');", desc: 'เดินหน้า 30 cm แล้วหยุดหมุน Spin ขวา 90°' },

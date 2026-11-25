@@ -129,6 +129,15 @@ export const REPORTER_DEFS = [
     ],
     precedence: 7
   },
+  {
+    op: 'MATH_BOX',
+    cat: 'math',
+    title: 'BOX',
+    sig: 'BOX(n)',
+    desc: 'แปลงจำนวนช่อง (1-8) เป็นระยะสนามจริง (cm)',
+    slots: [{ key: 'n', label: 'BOX(', default: 1, suffix: ')' }],
+    precedence: 7
+  },
 
   // Logic Category (ตรรกศาสตร์)
   {
@@ -345,6 +354,7 @@ export function exprToCode(val, expectedType = 'raw') {
         case 'MATH_MAX': return `max(${exprToCode(a.a, 'raw')}, ${exprToCode(a.b, 'raw')})`;
         case 'MATH_CONSTRAIN': return `constrain(${exprToCode(a.x, 'raw')}, ${exprToCode(a.low, 'raw')}, ${exprToCode(a.high, 'raw')})`;
         case 'MATH_RANDOM': return `random(${exprToCode(a.min, 'raw')}, ${exprToCode(a.max, 'raw')})`;
+        case 'MATH_BOX': return `BOX(${exprToCode(a.n, 'raw')})`;
         case 'LOGIC_EQ': return `${wrapIfLowerPrec(a.a, prec, false)} == ${wrapIfLowerPrec(a.b, prec, true)}`;
         case 'LOGIC_NEQ': return `${wrapIfLowerPrec(a.a, prec, false)} != ${wrapIfLowerPrec(a.b, prec, true)}`;
         case 'LOGIC_LT': return `${wrapIfLowerPrec(a.a, prec, false)} < ${wrapIfLowerPrec(a.b, prec, true)}`;
@@ -554,7 +564,7 @@ export function parseCodeArgToAst(rawStr, varNames = []) {
     return { kind: 'expr', op: 'MATH_NEG', args: { a: parseCodeArgToAst(text.slice(1), varNames) } };
   }
 
-  const fnMatch = text.match(/^(abs|min|max|constrain|random)\s*\(([\s\S]*)\)$/);
+  const fnMatch = text.match(/^(abs|min|max|constrain|random|BOX)\s*\(([\s\S]*)\)$/);
   if (fnMatch) {
     const fn = fnMatch[1];
     const args = splitTopLevelArgs(fnMatch[2]);
@@ -573,6 +583,9 @@ export function parseCodeArgToAst(rawStr, varNames = []) {
     if (fn === 'random' && args.length === 2) {
       return { kind: 'expr', op: 'MATH_RANDOM', args: { min: parseCodeArgToAst(args[0], varNames), max: parseCodeArgToAst(args[1], varNames) } };
     }
+    if (fn === 'BOX' && args.length === 1) {
+      return { kind: 'expr', op: 'MATH_BOX', args: { n: parseCodeArgToAst(args[0], varNames) } };
+    }
   }
 
   return text;
@@ -581,7 +594,7 @@ export function parseCodeArgToAst(rawStr, varNames = []) {
 // ============================================================================
 // Safe Recursive Runtime Evaluator (Simulator Engine)
 // ============================================================================
-export function evalExpression(node, variables = [], fallback = 0) {
+export function evalExpression(node, variables = [], fallback = 0, ctx = null) {
   if (node === null || node === undefined) return fallback;
   if (typeof node === 'number') return Number.isFinite(node) ? node : fallback;
   if (typeof node === 'boolean') return node ? 1 : 0;
@@ -596,8 +609,8 @@ export function evalExpression(node, variables = [], fallback = 0) {
     }
     if (node.kind === 'expr') {
       const a = node.args || {};
-      const valA = evalExpression(a.a, variables, 0);
-      const valB = evalExpression(a.b, variables, 0);
+      const valA = evalExpression(a.a, variables, 0, ctx);
+      const valB = evalExpression(a.b, variables, 0, ctx);
       switch (node.op) {
         case 'MATH_ADD': return valA + valB;
         case 'MATH_SUB': return valA - valB;
@@ -605,19 +618,24 @@ export function evalExpression(node, variables = [], fallback = 0) {
         case 'MATH_DIV': return valB === 0 ? 0 : valA / valB;
         case 'MATH_MOD': return valB === 0 ? 0 : valA % valB;
         case 'MATH_NEG': return -valA;
-        case 'MATH_ABS': return Math.abs(evalExpression(a.x, variables, 0));
+        case 'MATH_ABS': return Math.abs(evalExpression(a.x, variables, 0, ctx));
         case 'MATH_MIN': return Math.min(valA, valB);
         case 'MATH_MAX': return Math.max(valA, valB);
         case 'MATH_CONSTRAIN': {
-          const x = evalExpression(a.x, variables, 0);
-          const low = evalExpression(a.low, variables, 0);
-          const high = evalExpression(a.high, variables, 100);
+          const x = evalExpression(a.x, variables, 0, ctx);
+          const low = evalExpression(a.low, variables, 0, ctx);
+          const high = evalExpression(a.high, variables, 100, ctx);
           return Math.max(low, Math.min(high, x));
         }
         case 'MATH_RANDOM': {
-          const lo = evalExpression(a.min, variables, 0);
-          const hi = evalExpression(a.max, variables, 100);
+          const lo = evalExpression(a.min, variables, 0, ctx);
+          const hi = evalExpression(a.max, variables, 100, ctx);
           return (lo + hi) * 0.5; // deterministic midpoint for path simulation
+        }
+        case 'MATH_BOX': {
+          const nBoxes = evalExpression(a.n, variables, 0, ctx);
+          const tileCm = Math.max(5, Number(ctx?.boxTileCm) || 30);
+          return nBoxes > 0 ? nBoxes * tileCm : 0;
         }
         case 'LOGIC_EQ': return valA === valB ? 1 : 0;
         case 'LOGIC_NEQ': return valA !== valB ? 1 : 0;
@@ -628,8 +646,8 @@ export function evalExpression(node, variables = [], fallback = 0) {
         case 'LOGIC_AND': return valA && valB ? 1 : 0;
         case 'LOGIC_OR': return valA || valB ? 1 : 0;
         case 'LOGIC_NOT': return valA ? 0 : 1;
-        case 'LOGIC_TERNARY': return evalExpression(a.cond, variables, 0) ? valA : valB;
-        case 'LOGIC_BOOL': return evalExpression(a.val, variables, 0);
+        case 'LOGIC_TERNARY': return evalExpression(a.cond, variables, 0, ctx) ? valA : valB;
+        case 'LOGIC_BOOL': return evalExpression(a.val, variables, 0, ctx);
         default: return fallback;
       }
     }
@@ -645,7 +663,7 @@ export function evalExpression(node, variables = [], fallback = 0) {
   }
   const reparsed = parseCodeArgToAst(s, variables.map((v) => v.name));
   if (reparsed && typeof reparsed === 'object') {
-    return evalExpression(reparsed, variables, fallback);
+    return evalExpression(reparsed, variables, fallback, ctx);
   }
   return fallback;
 }

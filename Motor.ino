@@ -221,30 +221,63 @@ void driveStop() {
 }
 
 // ============================================================================
-// การอ่านระยะ Encoder และแปลงหน่วย CM -> Ticks (อ้างอิงตาม Sensor.ino ของ PT_MIDDLE_ENC_2026Endcode4MOV1)
+// การอ่านระยะ Encoder, ตารางระยะ 1-8 ช่อง (Box Cal) และแปลงหน่วย CM -> Ticks
 // ============================================================================
 const float ENCODER_WHEEL_DIAMETER_CM = 3.3f;
 
 float encoderCountsPerRevolution(int speed) {
-    if (speed < 0) {
-        speed = -speed;
-    }
-    if (speed >= 70) {
-        return 1000.0f;
-    }
-    if (speed >= 50) {
-        return 1200.0f;
-    }
+    (void)speed;
     return 1300.0f;
 }
 
 long encoderCentimetersToTicks(float distance_cm, int speed) {
+    (void)speed;
     if (distance_cm <= 0.0f) {
         return 0L;
     }
-    const float wheel_circumference_cm = 3.14159265f * ENCODER_WHEEL_DIAMETER_CM;
-    const float ticks_per_cm = encoderCountsPerRevolution(speed) / wheel_circumference_cm;
-    return (long)roundf(distance_cm * ticks_per_cm);
+    float tpcm = max(1.0f, ticksPerCm);
+    float tuneScale = constrain((300.0f + (float)distTuneMm) / 300.0f, 0.50f, 1.50f);
+    return (long)llround((double)distance_cm * (double)tpcm * (double)tuneScale);
+}
+
+float getBoxDistCm(int boxNum) {
+    switch (boxNum) {
+        case 1: return box1Cm;
+        case 2: return box2Cm;
+        case 3: return box3Cm;
+        case 4: return box4Cm;
+        case 5: return box5Cm;
+        case 6: return box6Cm;
+        case 7: return box7Cm;
+        case 8: return box8Cm;
+        default: return (float)boxNum * max(5.0f, boxTileCm);
+    }
+}
+
+float BOX(float boxes) {
+    if (boxes <= 0.0f) return 0.0f;
+    return boxes * max(5.0f, boxTileCm);
+}
+
+float mapFieldCmToRobotCm(float fieldCm) {
+    if (fieldCm <= 0.0f) return 0.0f;
+    if (!enableBoxDistCal) return fieldCm;
+    const float tile = max(5.0f, boxTileCm);
+    const float pts[9] = {
+        0.0f,
+        max(0.0f, box1Cm), max(0.0f, box2Cm), max(0.0f, box3Cm), max(0.0f, box4Cm),
+        max(0.0f, box5Cm), max(0.0f, box6Cm), max(0.0f, box7Cm), max(0.0f, box8Cm)
+    };
+    float boxF = fieldCm / tile;
+    if (boxF >= 8.0f) {
+        float slope = pts[8] - pts[7];
+        if (slope <= 0.5f) slope = tile;
+        return max(0.0f, pts[8] + (boxF - 8.0f) * slope);
+    }
+    int idx = constrain((int)floorf(boxF), 0, 7);
+    float frac = boxF - (float)idx;
+    float mapped = pts[idx] + frac * (pts[idx + 1] - pts[idx]);
+    return (mapped > 0.0f) ? mapped : 0.0f;
 }
 
 long readEncoderDistance() {
@@ -253,6 +286,14 @@ long readEncoderDistance() {
     int64_t total = abs64((int64_t)c[0]) + abs64((int64_t)c[1]) +
                     abs64((int64_t)c[2]) + abs64((int64_t)c[3]);
     return (long)(total / 4LL);
+}
+
+long readEncoderSignedDistance(bool forward) {
+    long c[4];
+    readPtEncoders(c);
+    int64_t sum = (int64_t)c[0] + (int64_t)c[1] + (int64_t)c[2] + (int64_t)c[3];
+    int64_t avg = sum / 4LL;
+    return (long)(forward ? avg : -avg);
 }
 
 long readEncoderSingleDistance(byte encoder_index) {
@@ -294,6 +335,7 @@ void closeDropB() {
 
 void DropF() {
     driveStop();
+    clearTurnDistCarry();
     missionNotifyCommand("DropF();", 11); // CMD_ICON_DROP_F
     setServoAngle(SERVO_S0, frontDrop);
     delay(servoDropDelayMs);
@@ -303,6 +345,7 @@ void DropF() {
 
 void DropB() {
     driveStop();
+    clearTurnDistCarry();
     missionNotifyCommand("DropB();", 12); // CMD_ICON_DROP_B
     setServoAngle(SERVO_S1, backDrop);
     delay(servoDropDelayMs);

@@ -2977,6 +2977,107 @@ html[data-sim-seek="on"] .preview-code-line:hover {
   display: none !important;
 }
 
+.cfg-box-cal-panel {
+  margin: 8px 0 12px;
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--g-surface);
+  transition: opacity 160ms var(--ease);
+}
+
+.cfg-box-cal-panel.disabled-panel {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.cfg-box-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.cfg-box-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+  flex: 1 1 260px;
+}
+
+.cfg-box-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cfg-box-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+@media (max-width: 680px) {
+  .cfg-box-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.cfg-box-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--g-panel);
+}
+
+.cfg-box-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.cfg-box-head strong {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.cfg-box-ref {
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  color: var(--dim);
+}
+
+.cfg-box-card input {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.cfg-box-diff {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  align-self: flex-end;
+}
+
+.cfg-box-diff.pos {
+  color: var(--ok);
+}
+
+.cfg-box-diff.neg {
+  color: var(--warn);
+}
+
+.cfg-box-diff.zero {
+  color: var(--muted);
+}
+
 .modal-footer {
   padding: 12px 18px;
   border-top: 1px solid var(--line);

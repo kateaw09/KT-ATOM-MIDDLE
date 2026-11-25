@@ -21,6 +21,7 @@ static float wrapDeg180(float deg) {
 // ============================================================================
 static void spinDegreeCore(float relative_degree, float threshold, int maxSpeedOverride,
                            bool stopAtEnd, bool notifyHud) {
+    clearTurnDistCarry();
     const int min_speed = spinMinSpeed;
     const int max_speed = (maxSpeedOverride > 0)
                               ? max(min_speed, constrain(abs(maxSpeedOverride), min_speed, 100))
@@ -107,6 +108,7 @@ void SpinDegree(float relativeDeg, int maxSpeed, bool stopAtEnd) {
 // ============================================================================
 static void turnDegreeCore(float relative_degree, float threshold, int maxSpeedOverride,
                            bool stopAtEnd, bool isBack, bool notifyHud) {
+    clearTurnDistCarry();
     const int min_speed = isBack ? turnBackMinSpeed : turnFrontMinSpeed;
     const int max_speed = (maxSpeedOverride > 0)
                               ? max(min_speed, constrain(abs(maxSpeedOverride), min_speed, 100))
@@ -210,6 +212,7 @@ void TrunDegreeBack(float relativeDeg, int maxSpeed, bool stopAtEnd) {
 // ============================================================================
 static void ttCurveCore(int speed_left, int speed_right, long distance_cm,
                         float angleDeg, bool isBack, const char* cmdLabel) {
+    clearTurnDistCarry();
     float target_degree = 0.0f;
     byte chanel_encoder;
     if (speed_left < speed_right) {

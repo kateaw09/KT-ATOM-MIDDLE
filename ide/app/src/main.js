@@ -531,7 +531,8 @@ function renderCalibrationCard() {
     $('calValLineThr').textContent = st.join(', ');
   }
   if ($('simCalSummaryText')) {
-    $('simCalSummaryText').textContent = `Cal (${cal.source}): ${(Number(cal.tpcm) || 125.4).toFixed(1)} t/cm · ${Math.round(cal.calms || 1150)}ms/30cm (${cmps} cm/s)`;
+    const boxCalTag = state.config?.enableBoxDistCal === false ? 'OFF' : 'ON';
+    $('simCalSummaryText').textContent = `Cal (${cal.source}): ${(Number(cal.tpcm) || 143.12).toFixed(1)} t/cm · ${Math.round(cal.calms || 1150)}ms/30cm (${cmps} cm/s) · BoxCal: ${boxCalTag}`;
   }
 }
 
@@ -866,6 +867,24 @@ function parseLineToBlock(line) {
   if (fn === 'BC4' && (args.length === 3 || args.length === 4)) {
     const dirVal = normalizeTurnDir(parseArg(args[2], 'L'), args[3]?.trim());
     return { type: 'BC4', params: { speed: parseArg(args[0], 50), cm: parseArg(args[1], 20), dir: dirVal } };
+  }
+
+  if (fn === 'FC_BOX' && args.length === 2) return { type: 'FC_BOX_SIMPLE', params: { speed: parseArg(args[0], 65), boxes: parseArg(args[1], 1), stop: true } };
+  if (fn === 'FC_BOX' && args.length === 3 && (args[2] === 'true' || args[2] === 'false' || args[2].includes('&&') || args[2].includes('||') || args[2].includes('==') || state.variables.some((v) => v.type === 'bool' && v.name === args[2]))) {
+    return { type: 'FC_BOX_SIMPLE', params: { speed: parseArg(args[0], 65), boxes: parseArg(args[1], 1), stop: parseArg(args[2], true) } };
+  }
+  if (fn === 'FC_BOX' && (args.length === 3 || args.length === 4)) {
+    const dirVal = normalizeTurnDir(parseArg(args[2], 'R'), args[3]?.trim());
+    return { type: 'FC_BOX_DIR', params: { speed: parseArg(args[0], 65), boxes: parseArg(args[1], 1), dir: dirVal } };
+  }
+
+  if (fn === 'BC_BOX' && args.length === 2) return { type: 'BC_BOX_SIMPLE', params: { speed: parseArg(args[0], 50), boxes: parseArg(args[1], 1), stop: true } };
+  if (fn === 'BC_BOX' && args.length === 3 && (args[2] === 'true' || args[2] === 'false' || args[2].includes('&&') || args[2].includes('||') || args[2].includes('==') || state.variables.some((v) => v.type === 'bool' && v.name === args[2]))) {
+    return { type: 'BC_BOX_SIMPLE', params: { speed: parseArg(args[0], 50), boxes: parseArg(args[1], 1), stop: parseArg(args[2], true) } };
+  }
+  if (fn === 'BC_BOX' && (args.length === 3 || args.length === 4)) {
+    const dirVal = normalizeTurnDir(parseArg(args[2], 'L'), args[3]?.trim());
+    return { type: 'BC_BOX_DIR', params: { speed: parseArg(args[0], 50), boxes: parseArg(args[1], 1), dir: dirVal } };
   }
 
   if ((fn === 'SpinDegree' || fn === 'spinDegree') && args.length === 1) return { type: 'SPIN', params: { deg: parseArg(args[0], 90) } };
@@ -3968,7 +3987,7 @@ async function syncCalFromConfigIno() {
 async function applyCalToConfigIno() {
   const cal = state.calibration;
   const patch = {
-    ticksPerCm: Number(cal.tpcm) || 125.4,
+    ticksPerCm: Number(cal.tpcm) || 143.12,
     distTuneMm: Math.round(Number(cal.distmm) || 0),
     calRun30cmMs: Math.max(150, Math.round(Number(cal.calms) || 1150)),
     motorTrim: Math.round(Number(cal.trim) || 0),
@@ -4180,6 +4199,137 @@ function openConfigModal() {
       }
       for (const field of secFields.filter((f) => f.requiresOverwrite)) overwriteGroup.appendChild(createConfigRow(field));
       body.appendChild(overwriteGroup);
+    } else if (sec.id === 'boxDist') {
+      const toggleField = secFields.find((f) => f.key === 'enableBoxDistCal');
+      const tileField = secFields.find((f) => f.key === 'boxTileCm');
+      const boxFields = secFields.filter((f) => f.boxNum);
+
+      const boxPanel = document.createElement('div');
+      boxPanel.className = 'cfg-box-cal-panel';
+      const boxEnabled = state.config.enableBoxDistCal !== undefined
+        ? !!state.config.enableBoxDistCal
+        : !!(toggleField?.default ?? true);
+      boxPanel.classList.toggle('disabled-panel', !boxEnabled);
+
+      if (toggleField) {
+        body.appendChild(createConfigRow(toggleField, (isEnabled) => {
+          boxPanel.classList.toggle('disabled-panel', !isEnabled);
+        }));
+      }
+
+      let tileInp = null;
+      if (tileField) {
+        const tileRow = createConfigRow(tileField);
+        tileInp = tileRow.querySelector('input');
+        body.appendChild(tileRow);
+      }
+
+      const toolbar = document.createElement('div');
+      toolbar.className = 'cfg-box-toolbar';
+      const hintEl = document.createElement('div');
+      hintEl.className = 'cfg-box-hint';
+      hintEl.textContent = 'ตั้งค่าระยะที่สั่งให้หุ่นยนต์วิ่งจริงต่อ 1–8 ช่อง (Simulator จะยังเดินตามระยะสนามจริงเสมอ)';
+
+      const actions = document.createElement('div');
+      actions.className = 'cfg-box-actions';
+      const btnReset = document.createElement('button');
+      btnReset.type = 'button';
+      btnReset.className = 'btn btn-xs btn-secondary';
+      btnReset.textContent = 'รีเซ็ตเท่าสนาม (30×N)';
+      const btnInterp = document.createElement('button');
+      btnInterp.type = 'button';
+      btnInterp.className = 'btn btn-xs btn-secondary';
+      btnInterp.textContent = 'ไล่ระยะอัตโนมัติ (จากช่อง 1 & 2)';
+      actions.append(btnReset, btnInterp);
+      toolbar.append(hintEl, actions);
+      boxPanel.appendChild(toolbar);
+
+      const grid = document.createElement('div');
+      grid.className = 'cfg-box-grid';
+      const cardMeta = [];
+      const boxInputs = {};
+
+      for (const field of boxFields) {
+        const n = field.boxNum;
+        const card = document.createElement('div');
+        card.className = 'cfg-box-card';
+
+        const head = document.createElement('div');
+        head.className = 'cfg-box-head';
+        const titleEl = document.createElement('strong');
+        titleEl.textContent = `${n} ช่อง`;
+        const refEl = document.createElement('span');
+        refEl.className = 'cfg-box-ref';
+        head.append(titleEl, refEl);
+
+        const inp = document.createElement('input');
+        inp.type = 'number';
+        inp.dataset.cfgKey = field.key;
+        inp.min = field.min ?? 1;
+        inp.max = field.max ?? 500;
+        inp.step = field.step ?? 0.5;
+        inp.value = state.config[field.key] ?? field.default ?? (n * 30);
+
+        const diffEl = document.createElement('span');
+        diffEl.className = 'cfg-box-diff';
+
+        card.append(head, inp, diffEl);
+        grid.appendChild(card);
+        boxInputs[n] = inp;
+        cardMeta.push({ n, inp, refEl, diffEl });
+      }
+
+      const round1Local = (val) => Math.round((Number(val) || 0) * 10) / 10;
+      const getTile = () => Math.max(5, parseFloat(tileInp?.value) || 30);
+      const refreshBoxDiffs = () => {
+        const tile = getTile();
+        for (const { n, inp, refEl, diffEl } of cardMeta) {
+          const refCm = round1Local(n * tile);
+          refEl.textContent = `สนาม ${refCm} cm`;
+          const curVal = parseFloat(inp.value);
+          const diff = (Number.isFinite(curVal) ? curVal : refCm) - refCm;
+          if (Math.abs(diff) < 0.05) {
+            diffEl.textContent = 'ตรงเป๊ะ';
+            diffEl.className = 'cfg-box-diff zero';
+          } else if (diff > 0) {
+            diffEl.textContent = `+${diff.toFixed(1)} cm`;
+            diffEl.className = 'cfg-box-diff pos';
+          } else {
+            diffEl.textContent = `${diff.toFixed(1)} cm`;
+            diffEl.className = 'cfg-box-diff neg';
+          }
+        }
+      };
+
+      btnReset.onclick = () => {
+        const tile = getTile();
+        for (const { n, inp } of cardMeta) {
+          inp.value = String(round1Local(n * tile));
+        }
+        refreshBoxDiffs();
+      };
+
+      btnInterp.onclick = () => {
+        const tile = getTile();
+        const raw1 = parseFloat(boxInputs[1]?.value);
+        const raw2 = parseFloat(boxInputs[2]?.value);
+        const v1 = Number.isFinite(raw1) ? raw1 : tile;
+        const v2 = Number.isFinite(raw2) ? raw2 : 2 * tile;
+        const step = v2 - v1;
+        for (let n = 3; n <= 8; n++) {
+          if (boxInputs[n]) {
+            boxInputs[n].value = String(Math.max(1, round1Local(v1 + (n - 1) * step)));
+          }
+        }
+        refreshBoxDiffs();
+      };
+
+      if (tileInp) tileInp.addEventListener('input', refreshBoxDiffs);
+      for (const { inp } of cardMeta) inp.addEventListener('input', refreshBoxDiffs);
+      refreshBoxDiffs();
+
+      boxPanel.appendChild(grid);
+      body.appendChild(boxPanel);
     } else {
       for (const field of secFields) body.appendChild(createConfigRow(field));
     }
