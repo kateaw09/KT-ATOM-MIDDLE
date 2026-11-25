@@ -13,6 +13,13 @@ void runMode2() {
 }
 
 void M2_Box1() {
+    FC(100, 30.0f, 'R');
+    STOP();
+    FC(100, 60.0f, 'R');
+    STOP();
+    FC(100, 90.0f, 'R');
+    STOP();
+    FC(100, 120.0f, 'R');
 }
 
 void M2_Box2() {

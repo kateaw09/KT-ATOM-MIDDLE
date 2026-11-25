@@ -532,7 +532,11 @@ function renderCalibrationCard() {
   }
   if ($('simCalSummaryText')) {
     const boxCalTag = state.config?.enableBoxDistCal === false ? 'OFF' : 'ON';
-    $('simCalSummaryText').textContent = `Cal (${cal.source}): ${(Number(cal.tpcm) || 143.12).toFixed(1)} t/cm · ${Math.round(cal.calms || 1150)}ms/30cm (${cmps} cm/s) · BoxCal: ${boxCalTag}`;
+    const rawOffset = Number(state.config?.distOffsetCm);
+    const offsetTag = (Number.isFinite(rawOffset) && Math.abs(rawOffset) >= 0.05)
+      ? ` · Offset: ${rawOffset > 0 ? '+' : ''}${rawOffset.toFixed(1)}cm`
+      : '';
+    $('simCalSummaryText').textContent = `Cal (${cal.source}): ${(Number(cal.tpcm) || 143.12).toFixed(1)} t/cm · ${Math.round(cal.calms || 1150)}ms/30cm (${cmps} cm/s) · BoxCal: ${boxCalTag}${offsetTag}`;
   }
 }
 
@@ -4201,6 +4205,7 @@ function openConfigModal() {
       body.appendChild(overwriteGroup);
     } else if (sec.id === 'boxDist') {
       const toggleField = secFields.find((f) => f.key === 'enableBoxDistCal');
+      const offsetField = secFields.find((f) => f.key === 'distOffsetCm');
       const tileField = secFields.find((f) => f.key === 'boxTileCm');
       const boxFields = secFields.filter((f) => f.boxNum);
 
@@ -4215,6 +4220,13 @@ function openConfigModal() {
         body.appendChild(createConfigRow(toggleField, (isEnabled) => {
           boxPanel.classList.toggle('disabled-panel', !isEnabled);
         }));
+      }
+
+      let offsetInp = null;
+      if (offsetField) {
+        const offsetRow = createConfigRow(offsetField);
+        offsetInp = offsetRow.querySelector('input');
+        body.appendChild(offsetRow);
       }
 
       let tileInp = null;
@@ -4283,19 +4295,34 @@ function openConfigModal() {
       const getTile = () => Math.max(5, parseFloat(tileInp?.value) || 30);
       const refreshBoxDiffs = () => {
         const tile = getTile();
+        const rawOfs = parseFloat(offsetInp?.value);
+        const ofs = Number.isFinite(rawOfs) ? Math.max(-10, Math.min(10, rawOfs)) : 0;
         for (const { n, inp, refEl, diffEl } of cardMeta) {
           const refCm = round1Local(n * tile);
           refEl.textContent = `สนาม ${refCm} cm`;
           const curVal = parseFloat(inp.value);
-          const diff = (Number.isFinite(curVal) ? curVal : refCm) - refCm;
-          if (Math.abs(diff) < 0.05) {
+          const baseVal = Number.isFinite(curVal) ? curVal : refCm;
+          const totalDiff = (baseVal + ofs) - refCm;
+          if (Math.abs(ofs) >= 0.05) {
+            const netCm = baseVal + ofs;
+            if (Math.abs(totalDiff) < 0.05) {
+              diffEl.textContent = `สุทธิ ${netCm.toFixed(1)} cm (ตรงเป๊ะ)`;
+              diffEl.className = 'cfg-box-diff zero';
+            } else if (totalDiff > 0) {
+              diffEl.textContent = `สุทธิ ${netCm.toFixed(1)} cm (+${totalDiff.toFixed(1)})`;
+              diffEl.className = 'cfg-box-diff pos';
+            } else {
+              diffEl.textContent = `สุทธิ ${netCm.toFixed(1)} cm (${totalDiff.toFixed(1)})`;
+              diffEl.className = 'cfg-box-diff neg';
+            }
+          } else if (Math.abs(totalDiff) < 0.05) {
             diffEl.textContent = 'ตรงเป๊ะ';
             diffEl.className = 'cfg-box-diff zero';
-          } else if (diff > 0) {
-            diffEl.textContent = `+${diff.toFixed(1)} cm`;
+          } else if (totalDiff > 0) {
+            diffEl.textContent = `+${totalDiff.toFixed(1)} cm`;
             diffEl.className = 'cfg-box-diff pos';
           } else {
-            diffEl.textContent = `${diff.toFixed(1)} cm`;
+            diffEl.textContent = `${totalDiff.toFixed(1)} cm`;
             diffEl.className = 'cfg-box-diff neg';
           }
         }
@@ -4324,6 +4351,7 @@ function openConfigModal() {
         refreshBoxDiffs();
       };
 
+      if (offsetInp) offsetInp.addEventListener('input', refreshBoxDiffs);
       if (tileInp) tileInp.addEventListener('input', refreshBoxDiffs);
       for (const { inp } of cardMeta) inp.addEventListener('input', refreshBoxDiffs);
       refreshBoxDiffs();

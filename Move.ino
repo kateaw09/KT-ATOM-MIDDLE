@@ -74,8 +74,28 @@ void missionFinishCommandBeep() {
 
 float g_turnExitCarryCm = 0.0f; // + = เยื้องไปข้างหน้าตามแกนหัวหุ่น, - = เยื้องไปข้างหลัง
 
+static int           g_flowLastDir        = 0;     // +1 = หน้า, -1 = หลัง, 0 = หยุดนิ่ง
+static int           g_flowCarrySpeed     = 0;     // ความเร็วส่งต่อเข้าทางตรงถัดไปเพื่อไม่ให้ชะลอสะดุด
+static unsigned long g_flowStampMs        = 0;     // เวลาที่จบคำสั่งก่อนหน้า (ms)
+static float         g_flowPendingCoastCm = 0.0f;  // ระยะไหลหยุดที่ยังไม่เกิด (ชดเชยคืนเมื่อเดินต่อทิศเดิมทันที)
+
+void clearMotionFlowState() {
+    g_flowLastDir        = 0;
+    g_flowCarrySpeed     = 0;
+    g_flowStampMs        = 0;
+    g_flowPendingCoastCm = 0.0f;
+}
+
+void notifyTurnFlowExit(int dirSign, int carrySpeed) {
+    g_flowLastDir        = (dirSign > 0) ? 1 : ((dirSign < 0) ? -1 : 0);
+    g_flowCarrySpeed     = constrain(abs(carrySpeed), 0, 100);
+    g_flowStampMs        = millis();
+    g_flowPendingCoastCm = 0.0f;
+}
+
 void clearTurnDistCarry() {
     g_turnExitCarryCm = 0.0f;
+    clearMotionFlowState();
 }
 
 void setTurnDistCarry(float signedCm) {
@@ -507,11 +527,23 @@ static void baseMoveEncInternal(int Min_speed, int Max_speed, float distance_cm,
                                 float KP, float KD, bool forward, bool stop_at_end,
                                 const char* hudLabel = nullptr, int hudIcon = 0) {
     if (distance_cm <= 0.0f) {
-        if (stop_at_end) driveStop();
+        if (stop_at_end) {
+            driveStop();
+            clearMotionFlowState();
+        }
         return;
     }
 
-    float robot_cm = mapFieldCmToRobotCm(distance_cm);
+    int thisDir = forward ? 1 : -1;
+    unsigned long flowAge = millis() - g_flowStampMs;
+    bool isFlowFresh   = (g_flowLastDir != 0 && flowAge < 60UL);
+    bool isSameDirFlow = (isFlowFresh && g_flowLastDir == thisDir);
+    float refundCoastCm = isSameDirFlow ? g_flowPendingCoastCm : 0.0f;
+    int flowStartSpd    = isSameDirFlow ? g_flowCarrySpeed : 0;
+    clearMotionFlowState();
+
+    float robot_cm = mapFieldCmToRobotCm(distance_cm) + refundCoastCm;
+    if (robot_cm < 0.0f) robot_cm = 0.0f;
     int reqSpeed   = constrain(abs(Max_speed), 1, 100);
     long target_ticks = encoderCentimetersToTicks(robot_cm, reqSpeed);
     if (target_ticks <= 0L) {
@@ -526,14 +558,18 @@ static void baseMoveEncInternal(int Min_speed, int Max_speed, float distance_cm,
     int minMoveFloor = constrain(motorMinMoveSpeed, 1, 40);
     int arriveTarget = stop_at_end
         ? min(reqSpeed, constrain(moveArriveSpeed, 1, 60))
-        : min(reqSpeed, constrain(Min_speed, 1, 100));
+        : ((Ramp_down == 0) ? reqSpeed : min(reqSpeed, constrain(Min_speed, 1, 100)));
     int startTarget  = min(reqSpeed, max(constrain(moveArriveSpeed, 1, 60), minMoveFloor));
+    if (flowStartSpd > startTarget) {
+        startTarget = min(reqSpeed, flowStartSpd);
+    }
     float accelRate  = max(50.0f, moveAccelRate);
     float decelRate  = max(50.0f, moveDecelRate);
 
     int legacyMinSpd = min(constrain(Min_speed, 1, 100), reqSpeed);
     int current_speed = enableSpeedInvariantDist ? startTarget : legacyMinSpd;
-    float previous_error = 0.0f;
+    float previous_error = wrapAngle180(current_degree - safeReadYaw());
+    float lastHeadingErr = previous_error;
     unsigned long startTime = millis();
     unsigned long timeoutMs = (reqSpeed < 25)
         ? constrain((unsigned long)(robot_cm * 1200.0f / (float)max(1, reqSpeed)), 10000UL, 35000UL)
@@ -545,13 +581,23 @@ static void baseMoveEncInternal(int Min_speed, int Max_speed, float distance_cm,
     int stallBoost            = 0;
 
     resetEncoder();
+    long prev_raw_ticks    = 0;
+    double projected_ticks = 0.0;
 
     while (true) {
         serviceNonBlockingBeep();
         missionUpdateTimerHUD();
         unsigned long nowMs = millis();
         unsigned long elapsed_since_start = nowMs - startTime;
-        long current_ticks = readEncoderDistance();
+        long raw_ticks = readEncoderDistance();
+        long d_ticks   = raw_ticks - prev_raw_ticks;
+        if (d_ticks > 0L) {
+            float cosProj = cosf(lastHeadingErr * 0.0174532925f);
+            if (cosProj < 0.25f) cosProj = 0.25f;
+            projected_ticks += (double)d_ticks * (double)cosProj;
+            prev_raw_ticks = raw_ticks;
+        }
+        long current_ticks = (long)llround(projected_ticks);
 
         if (current_ticks >= target_ticks) {
             if (stop_at_end) {
@@ -601,6 +647,18 @@ static void baseMoveEncInternal(int Min_speed, int Max_speed, float distance_cm,
                     }
                 }
             }
+            float appliedCoastOffset = 0.0f;
+            if (distOffsetCm < -0.001f) {
+                float absOfs = min(10.0f, -distOffsetCm);
+                float scale = (distance_cm < 10.0f) ? (distance_cm / 10.0f) : 1.0f;
+                appliedCoastOffset = absOfs * scale;
+            }
+            g_flowLastDir        = thisDir;
+            g_flowCarrySpeed     = stop_at_end
+                ? min(reqSpeed, max(arriveTarget, 25))
+                : max(arriveTarget, current_speed);
+            g_flowStampMs        = millis();
+            g_flowPendingCoastCm = appliedCoastOffset;
             break;
         }
 
@@ -647,7 +705,7 @@ static void baseMoveEncInternal(int Min_speed, int Max_speed, float distance_cm,
 
         unsigned long dtStall = nowMs - lastStallMs;
         if (dtStall >= 15UL) {
-            long dTicks = current_ticks - lastStallTicks;
+            long dTicks = raw_ticks - lastStallTicks;
             long minDesired = max(1L, (long)roundf((float)current_speed * 0.25f));
             if (enableSpeedInvariantDist && (current_speed < minMoveFloor + 6 || dTicks < minDesired)) {
                 if (dTicks < minDesired) {
@@ -659,13 +717,13 @@ static void baseMoveEncInternal(int Min_speed, int Max_speed, float distance_cm,
             } else if (stallBoost > 0) {
                 stallBoost = max(0, stallBoost - 1);
             }
-            lastStallTicks = current_ticks;
+            lastStallTicks = raw_ticks;
             lastStallMs = nowMs;
         }
 
         int driveSpd = enableSpeedInvariantDist ? constrain(current_speed + stallBoost, 1, 100) : current_speed;
-        if (forward) moveForward(driveSpd, previous_error, KP, KD);
-        else         moveBackward(driveSpd, previous_error, KP, KD);
+        if (forward) lastHeadingErr = moveForward(driveSpd, previous_error, KP, KD);
+        else         lastHeadingErr = moveBackward(driveSpd, previous_error, KP, KD);
 
         if (!hudNotified) {
             hudNotified = true;
@@ -674,6 +732,7 @@ static void baseMoveEncInternal(int Min_speed, int Max_speed, float distance_cm,
 
         if (elapsed_since_start >= timeoutMs) {
             driveStop();
+            clearMotionFlowState();
             break;
         }
         delay(1);
@@ -970,7 +1029,7 @@ static void moveStraightEnc(int speed, float cm, bool forward, bool stopAtEnd,
 }
 
 void FC(int speed, float cm, bool stopAtEnd) {
-    moveStraightEnc(speed, cm, true, stopAtEnd, ramp_up_turn, ramp_down_turn);
+    moveStraightEnc(speed, cm, true, stopAtEnd, ramp_up_turn, stopAtEnd ? ramp_down_turn : 0L);
 }
 
 void FC(int speed, float cm, int rUp, int rDown) {
@@ -978,7 +1037,7 @@ void FC(int speed, float cm, int rUp, int rDown) {
 }
 
 void BC(int speed, float cm, bool stopAtEnd) {
-    moveStraightEnc(speed, cm, false, stopAtEnd, ramp_up_turn, ramp_down_turn);
+    moveStraightEnc(speed, cm, false, stopAtEnd, ramp_up_turn, stopAtEnd ? ramp_down_turn : 0L);
 }
 
 void BC(int speed, float cm, int rUp, int rDown) {
@@ -1010,7 +1069,7 @@ static void moveCompoundTurn(int speed, float cm, char dir, bool forward, float 
     if (adjCm > 0.05f) {
         char subBuf[22];
         snprintf(subBuf, sizeof(subBuf), forward ? "FC(%d,%.0f)" : "BC(%d,%.0f)", speed, cm);
-        moveEncTurnWithHud(speed, adjCm, forward, doStopAndSpin, rUp, rDown, subBuf);
+        moveEncTurnWithHud(speed, adjCm, forward, doStopAndSpin, rUp, doStopAndSpin ? rDown : 0L, subBuf);
     } else if (doStopAndSpin) {
         driveStop();
     }
@@ -1022,10 +1081,10 @@ static void moveCompoundTurn(int speed, float cm, char dir, bool forward, float 
         if (doStopAndSpin) {
             SpinDegree(turnAngle, -1, true);
         } else if (forward) {
-            TrunDegreeFront(turnAngle, -1, true);
+            TrunDegreeFront(turnAngle, -1, false);
             setTurnDistCarry(calcTurnExitCarryCm(fabsf(turnAngle)));
         } else {
-            TrunDegreeBack(turnAngle, -1, true);
+            TrunDegreeBack(turnAngle, -1, false);
             setTurnDistCarry(-calcTurnExitCarryCm(fabsf(turnAngle)));
         }
         turn = false;

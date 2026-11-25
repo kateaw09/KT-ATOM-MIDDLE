@@ -119,8 +119,8 @@ static void turnDegreeCore(float relative_degree, float threshold, int maxSpeedO
     const unsigned long stable_time = 0;
 
     unsigned long stable_timer = 0;
-    float previous_error = 0.0f;
     current_degree = wrapDeg180(current_degree + relative_degree);
+    float previous_error = wrapDeg180(current_degree - safeReadYaw());
 
     if (notifyHud) {
         char cmdBuf[24];
@@ -174,6 +174,10 @@ static void turnDegreeCore(float relative_degree, float threshold, int maxSpeedO
         }
         previous_error = error;
         delay(1);
+    }
+
+    if (!stopAtEnd && s_tuneFault == 0) {
+        notifyTurnFlowExit(isBack ? -1 : 1, max(min_speed, 50));
     }
 
     if (stopAtEnd && notifyHud && s_tuneFault == 0) {

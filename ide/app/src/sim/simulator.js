@@ -17,22 +17,31 @@ export function getCalTuneScale(cal) {
 export function mapFieldCmToRobotCm(fieldCm, config = {}) {
   const d = Number(fieldCm) || 0;
   if (d <= 0) return 0;
-  if (config?.enableBoxDistCal === false) return d;
-  const tile = Math.max(5, Number(config?.boxTileCm) || 30);
-  const pts = [0];
-  for (let i = 1; i <= 8; i++) {
-    const raw = Number(config?.[`box${i}Cm`]);
-    pts.push(Number.isFinite(raw) ? Math.max(0, raw) : i * tile);
+  let mapped = d;
+  if (config?.enableBoxDistCal !== false) {
+    const tile = Math.max(5, Number(config?.boxTileCm) || 30);
+    const pts = [0];
+    for (let i = 1; i <= 8; i++) {
+      const raw = Number(config?.[`box${i}Cm`]);
+      pts.push(Number.isFinite(raw) ? Math.max(0, raw) : i * tile);
+    }
+    const boxF = d / tile;
+    if (boxF >= 8) {
+      let slope = pts[8] - pts[7];
+      if (slope <= 0.5) slope = tile;
+      mapped = pts[8] + (boxF - 8) * slope;
+    } else {
+      const idx = Math.max(0, Math.min(7, Math.floor(boxF)));
+      const frac = boxF - idx;
+      mapped = pts[idx] + frac * (pts[idx + 1] - pts[idx]);
+    }
   }
-  const boxF = d / tile;
-  if (boxF >= 8) {
-    let slope = pts[8] - pts[7];
-    if (slope <= 0.5) slope = tile;
-    return Math.max(0, pts[8] + (boxF - 8) * slope);
+  const rawOffset = Number(config?.distOffsetCm);
+  const offsetCm = Number.isFinite(rawOffset) ? Math.max(-10, Math.min(10, rawOffset)) : 0;
+  if (Math.abs(offsetCm) > 0.001) {
+    const scale = d < 10 ? d / 10 : 1;
+    mapped += offsetCm * scale;
   }
-  const idx = Math.max(0, Math.min(7, Math.floor(boxF)));
-  const frac = boxF - idx;
-  const mapped = pts[idx] + frac * (pts[idx + 1] - pts[idx]);
   return mapped > 0 ? mapped : 0;
 }
 
@@ -133,7 +142,8 @@ export function buildSimSegments(state, overrideOpts = null) {
   const enableComp = state.config?.enableTurnDistComp !== false;
   const innerRatio = Math.max(0, Math.min(0.85, Number(state.config?.turnInnerRatio) || 0));
   const innerScale = innerRatio > 0.01 ? (1 + innerRatio) / (1 - innerRatio) : 1;
-  const baseTurnRadius = Math.max(2.5, Number(state.config?.turnExitRadiusCm) || 5.8);
+  const rawExitRadius = Number(state.config?.turnExitRadiusCm);
+  const baseTurnRadius = Number.isFinite(rawExitRadius) ? Math.max(0, rawExitRadius) : 2.8;
   const effTurnRadius = Math.min(22, baseTurnRadius * innerScale);
   const turnFrontSpd = Number(state.config?.turnFrontMaxSpeed) || 80;
   const turnBackSpd = Number(state.config?.turnBackMaxSpeed) || 80;
@@ -308,20 +318,29 @@ export function buildSimSegments(state, overrideOpts = null) {
         const amtLbl = isBox ? `${boxes}b` : `${moveCm.toFixed(0)}cm`;
 
         if (isSwing) {
-          const tanHalf = Math.tan((Math.min(135, Math.max(5, Math.abs(ang))) * 0.5 * Math.PI) / 180);
-          const prevCarrySigned = enableComp ? (forward ? turnExitCarryCm : -turnExitCarryCm) : 0;
-          const availWorld = Math.max(0, moveCm - prevCarrySigned);
-          const arcR = (enableComp && moveCm > 0.1)
-            ? Math.min(effTurnRadius, Math.max(2.0, (availWorld * 0.85) / Math.max(0.2, tanHalf)))
-            : effTurnRadius;
-          const entryComp = enableComp ? Math.min(availWorld, arcR * tanHalf) : 0;
-          const straightWorld = enableComp ? consumeCarryWorldCm(moveCm, forward, entryComp) : moveCm;
-          if (straightWorld > 0.05) {
-            pushMoveWorld(idx, forward ? straightWorld : -straightWorld, spd, `${prefix} ${amtLbl}`, null, true, straightWorld);
-          }
           const turnLabel = is45 ? `45° Turn '${d}'` : `Turn '${d}'`;
-          pushArcTurn(idx, ang, arcR, forward ? 1 : -1, spd || (forward ? turnFrontSpd : turnBackSpd), turnLabel);
-          turnExitCarryCm = enableComp ? (forward ? arcR * tanHalf : -arcR * tanHalf) : 0;
+          if (effTurnRadius < 0.05) {
+            const straightWorld = enableComp ? consumeCarryWorldCm(moveCm, forward, 0) : moveCm;
+            turnExitCarryCm = 0;
+            if (straightWorld > 0.05) {
+              pushMoveWorld(idx, forward ? straightWorld : -straightWorld, spd, `${prefix} ${amtLbl}`, null, true, straightWorld);
+            }
+            pushTurn(idx, ang, turnLabel, true);
+          } else {
+            const tanHalf = Math.tan((Math.min(135, Math.max(5, Math.abs(ang))) * 0.5 * Math.PI) / 180);
+            const prevCarrySigned = enableComp ? (forward ? turnExitCarryCm : -turnExitCarryCm) : 0;
+            const availWorld = Math.max(0, moveCm - prevCarrySigned);
+            const arcR = (enableComp && moveCm > 0.1)
+              ? Math.min(effTurnRadius, Math.max(0.2, (availWorld * 0.85) / Math.max(0.2, tanHalf)))
+              : effTurnRadius;
+            const entryComp = enableComp ? Math.min(availWorld, arcR * tanHalf) : 0;
+            const straightWorld = enableComp ? consumeCarryWorldCm(moveCm, forward, entryComp) : moveCm;
+            if (straightWorld > 0.05) {
+              pushMoveWorld(idx, forward ? straightWorld : -straightWorld, spd, `${prefix} ${amtLbl}`, null, true, straightWorld);
+            }
+            pushArcTurn(idx, ang, arcR, forward ? 1 : -1, spd || (forward ? turnFrontSpd : turnBackSpd), turnLabel);
+            turnExitCarryCm = enableComp ? (forward ? arcR * tanHalf : -arcR * tanHalf) : 0;
+          }
         } else {
           const straightWorld = enableComp ? consumeCarryWorldCm(moveCm, forward, 0) : moveCm;
           turnExitCarryCm = 0;

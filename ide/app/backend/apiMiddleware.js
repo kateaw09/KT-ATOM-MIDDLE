@@ -72,6 +72,7 @@ const CONFIG_SCHEMA = [
   { key: 'motorMinMoveSpeed', type: 'int' },
   { key: 'enableEndPositionTrim', type: 'bool' },
   { key: 'enableBoxDistCal', type: 'bool' },
+  { key: 'distOffsetCm', type: 'float' },
   { key: 'boxTileCm', type: 'float' },
   { key: 'box1Cm', type: 'float' },
   { key: 'box2Cm', type: 'float' },

@@ -261,22 +261,30 @@ float BOX(float boxes) {
 
 float mapFieldCmToRobotCm(float fieldCm) {
     if (fieldCm <= 0.0f) return 0.0f;
-    if (!enableBoxDistCal) return fieldCm;
-    const float tile = max(5.0f, boxTileCm);
-    const float pts[9] = {
-        0.0f,
-        max(0.0f, box1Cm), max(0.0f, box2Cm), max(0.0f, box3Cm), max(0.0f, box4Cm),
-        max(0.0f, box5Cm), max(0.0f, box6Cm), max(0.0f, box7Cm), max(0.0f, box8Cm)
-    };
-    float boxF = fieldCm / tile;
-    if (boxF >= 8.0f) {
-        float slope = pts[8] - pts[7];
-        if (slope <= 0.5f) slope = tile;
-        return max(0.0f, pts[8] + (boxF - 8.0f) * slope);
+    float mapped = fieldCm;
+    if (enableBoxDistCal) {
+        const float tile = max(5.0f, boxTileCm);
+        const float pts[9] = {
+            0.0f,
+            max(0.0f, box1Cm), max(0.0f, box2Cm), max(0.0f, box3Cm), max(0.0f, box4Cm),
+            max(0.0f, box5Cm), max(0.0f, box6Cm), max(0.0f, box7Cm), max(0.0f, box8Cm)
+        };
+        float boxF = fieldCm / tile;
+        if (boxF >= 8.0f) {
+            float slope = pts[8] - pts[7];
+            if (slope <= 0.5f) slope = tile;
+            mapped = pts[8] + (boxF - 8.0f) * slope;
+        } else {
+            int idx = constrain((int)floorf(boxF), 0, 7);
+            float frac = boxF - (float)idx;
+            mapped = pts[idx] + frac * (pts[idx + 1] - pts[idx]);
+        }
     }
-    int idx = constrain((int)floorf(boxF), 0, 7);
-    float frac = boxF - (float)idx;
-    float mapped = pts[idx] + frac * (pts[idx + 1] - pts[idx]);
+    float offsetCm = constrain(distOffsetCm, -10.0f, 10.0f);
+    if (fabsf(offsetCm) > 0.001f) {
+        float scale = (fieldCm < 10.0f) ? (fieldCm / 10.0f) : 1.0f;
+        mapped += offsetCm * scale;
+    }
     return (mapped > 0.0f) ? mapped : 0.0f;
 }
 

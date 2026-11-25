@@ -13,7 +13,13 @@ void runMode3() {
 }
 
 void M3_Box1() {
-
+    FC(100, 30.0f);
+    STOP();
+    FC(100, 60.0f);
+    STOP();
+    FC(100, 90.0f);
+    STOP();
+    FC(100, 120.0f);
 }
 
 void M3_Box2() {
