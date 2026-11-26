@@ -33,6 +33,7 @@ export const CATEGORIES = [
   { id: 'spin', label: 'Gyro Spin', icon: 'turn', color: '#1e40af' },
   { id: 'curve', label: 'Curve Encoder', icon: 'turn', color: '#0f766e' },
   { id: 'time', label: 'Time Move', icon: 'gauge', color: '#0e7490' },
+  { id: 'path', label: 'Path & EKF', icon: 'move', color: '#7c3aed' },
   { id: 'line', label: 'Line & Drop', icon: 'line', color: '#15803d' },
   { id: 'ctrl', label: 'Control', icon: 'settings', color: '#be123c' }
 ];
@@ -45,9 +46,25 @@ export const CAT_COLORS = {
   spin: { bg: '#1e40af', dark: '#1e3a8a' },
   curve: { bg: '#0f766e', dark: '#115e59' },
   time: { bg: '#0e7490', dark: '#155e75' },
+  path: { bg: '#7c3aed', dark: '#6d28d9' },
   line: { bg: '#15803d', dark: '#166534' },
   ctrl: { bg: '#be123c', dark: '#9f1239' }
 };
+
+export function parseWaypointListText(rawText) {
+  const parts = String(rawText || '')
+    .split(/[;\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const pts = [];
+  for (const part of parts) {
+    const nums = part.split(',').map((s) => parseFloat(s.trim()));
+    if (nums.length >= 2 && Number.isFinite(nums[0]) && Number.isFinite(nums[1])) {
+      pts.push({ x: nums[0], y: nums[1] });
+    }
+  }
+  return pts;
+}
 
 export function buildCommandDefs(getVariables) {
   return [
@@ -312,6 +329,54 @@ export function buildCommandDefs(getVariables) {
       toCode: (p) => `BB(${intLit(p.speed)}, ${intLit(p.ms)});`
     },
     {
+      type: 'EKF_RESET',
+      cat: 'path',
+      title: 'ekfReset',
+      sig: 'ekfReset(x, y, headingDeg)',
+      desc: 'รีเซ็ตพิกัด PoseEKF (x, y ซม., มุมองศา)',
+      defaults: { x: 0, y: 0, deg: 0 },
+      fields: [
+        { key: 'x', label: 'x', type: 'number' },
+        { key: 'y', label: 'y', type: 'number' },
+        { key: 'deg', label: 'deg', type: 'number' }
+      ],
+      toCode: (p) => `ekfReset(${floatLit(p.x)}, ${floatLit(p.y)}, ${floatLit(p.deg)});`
+    },
+    {
+      type: 'FOLLOW_PATH',
+      cat: 'path',
+      title: 'followPath',
+      sig: 'followPath(pts, maxCmPs, stop)',
+      desc: 'วิ่งตามเส้นทาง Pure Pursuit (ใส่จุด x,y คั่นด้วย ; เช่น 30,0; 60,0; 60,30)',
+      defaults: { points: '30,0; 60,0; 60,30', speed: 50, stop: true },
+      fields: [
+        { key: 'points', label: 'pts', type: 'text' },
+        { key: 'speed', label: 'cm/s', type: 'number' },
+        { key: 'stop', label: 'stop', type: 'bool' }
+      ],
+      toCode: (p) => {
+        const pts = parseWaypointListText(p.points);
+        const list = (pts.length >= 2 ? pts : [{ x: 30, y: 0 }, { x: 60, y: 30 }])
+          .map((pt) => `{${floatLit(pt.x)}, ${floatLit(pt.y)}}`)
+          .join(', ');
+        const cnt = Math.max(2, pts.length);
+        return `{ Waypoint _p[] = {${list}}; followPath(_p, ${cnt}, ${floatLit(p.speed)}, ${boolLit(p.stop)}); }`;
+      }
+    },
+    {
+      type: 'VEL_DRIVE',
+      cat: 'path',
+      title: 'driveVel',
+      sig: 'driveWheelVelocitiesCmPs(vL, vR)',
+      desc: 'คุมความเร็วล้อซ้าย-ขวาหน่วย cm/s ด้วย Velocity PID+FF',
+      defaults: { vL: 40, vR: 40 },
+      fields: [
+        { key: 'vL', label: 'vL', type: 'number' },
+        { key: 'vR', label: 'vR', type: 'number' }
+      ],
+      toCode: (p) => `driveWheelVelocitiesCmPs(${floatLit(p.vL)}, ${floatLit(p.vR)});`
+    },
+    {
       type: 'SETF',
       cat: 'line',
       title: 'SetF',
@@ -390,7 +455,7 @@ export function buildCommandDefs(getVariables) {
       cat: 'line',
       title: 'DropF',
       sig: 'DropF(speed)',
-      desc: 'วิ่งเข้าเส้นหน้า (SetFront_drop) -> ปล่อยลูกบาศก์หน้า',
+      desc: 'วิ่งเข้าเส้นหน้า (Align Front) -> ปล่อยลูกบาศก์หน้า',
       defaults: { speed: 30 },
       fields: [{ key: 'speed', label: 'spd', type: 'number' }],
       toCode: (p) => `DropF(${intLit(p.speed)});`
@@ -400,7 +465,7 @@ export function buildCommandDefs(getVariables) {
       cat: 'line',
       title: 'DropB',
       sig: 'DropB(speed)',
-      desc: 'ถอยเข้าเส้นหลัง (SetBack_drop) -> ปล่อยลูกบาศก์หลัง',
+      desc: 'ถอยเข้าเส้นหลัง (Align Back) -> ปล่อยลูกบาศก์หลัง',
       defaults: { speed: 30 },
       fields: [{ key: 'speed', label: 'spd', type: 'number' }],
       toCode: (p) => `DropB(${intLit(p.speed)});`
@@ -493,7 +558,7 @@ export function buildCommandDefs(getVariables) {
 export const DEFAULT_MOTION_CONFIG = {
   useCodeMotionDefaults: true,
   enableBoxDistCal: true,
-  distOffsetCm: 0.0,
+  distOffsetCm: -2.0,
   boxTileCm: 30.0,
   box1Cm: 30.0,
   box2Cm: 60.0,
@@ -513,42 +578,64 @@ export const DEFAULT_MOTION_CONFIG = {
   fwdKd: 15.0,
   bwdKp: 1.2,
   bwdKd: 15.0,
-  kp_turn: 1.35,
+  kp_turn: 1.5,
   kd_turn: 15.0,
   Set_kp: 2.0,
   Set_kd: 15.0,
   kp_time: 1.8,
   kd_time: 15.0,
-  spinKp: 1.2,
-  spinKd: 0.15,
-  spinMinSpeed: 20,
+  spinKp: 2.0,
+  spinKd: 0.16,
+  spinMinSpeed: 24,
   spinMaxSpeed: 100,
-  turnFrontKp: 2.0,
-  turnFrontKd: 0.1,
-  turnFrontMinSpeed: 40,
-  turnFrontMaxSpeed: 80,
-  turnBackKp: 2.0,
-  turnBackKd: 0.1,
-  turnBackMinSpeed: 40,
-  turnBackMaxSpeed: 80,
-  threshold_spinDegree: 75.0,
+  turnFrontKp: 2.5,
+  turnFrontKd: 0.16,
+  turnFrontMinSpeed: 28,
+  turnFrontMaxSpeed: 100,
+  turnBackKp: 2.5,
+  turnBackKd: 0.16,
+  turnBackMinSpeed: 28,
+  turnBackMaxSpeed: 100,
+  threshold_spinDegree: 1.5,
   spinLeftOffsetDeg: 0.0,
-  smallAngle_threshold: 60.0,
-  smallAngle_turnDegree: 50.0,
+  smallAngle_threshold: 30.0,
+  smallAngle_turnDegree: 1.5,
   turnRightOffsetDeg: 0.0,
-  enableTurnDistComp: false,
-  turnEntryCompCm: 8.0,
+  enableTurnDistComp: true,
+  turnEntryCompCm: 10.0,
   turnExitRadiusCm: 2.8,
-  servoDropDelayMs: 200
+  servoDropDelayMs: 200,
+  effectiveTrackCm: 11.5,
+  motorI2cDedupMs: 12,
+  velKs: 8.0,
+  velKv: 0.83,
+  velKp: 0.9,
+  velKi: 2.5,
+  velKd: 0.02,
+  velIntegralLimit: 25.0,
+  velEmaAlpha: 0.38,
+  ekfQPos: 0.02,
+  ekfQHeadingBase: 0.002,
+  ekfQHeadingTurn: 0.06,
+  ekfRImuYaw: 0.0015,
+  ppLookaheadMinCm: 12.0,
+  ppLookaheadMaxCm: 28.0,
+  ppLookaheadGain: 0.25,
+  ppMaxLatAccel: 120.0,
+  ppGoalToleranceCm: 3.0,
+  ppWaypointSpacingCm: 4.0
 };
 
 export const CONFIG_SECTIONS = [
   { id: 'mode', title: 'โหมดการทำงานเริ่มต้น (Boot & Run Mode)' },
   { id: 'boxDist', title: 'ตารางระยะเดินตามช่อง 1–8 ช่อง (Box Distance Calibration)' },
   { id: 'speedInvariant', title: 'คุมระยะคงที่ทุกความเร็ว 1–100 (Speed-Invariant Motion)' },
-  { id: 'pd', title: 'จูนความตรง Gyro PD (เดินหน้า / ถอยหลัง)' },
+  { id: 'pd', title: 'จูนความตรง Gyro PD (เดินหน้า / ถอยหลัง / Time)' },
   { id: 'spin', title: 'จูนการหมุนอยู่กับที่และเลี้ยว Pivot (Gyro Spin & Turn)' },
   { id: 'turnComp', title: 'ชดเชยระยะเข้า-ออกโค้งอัตโนมัติ (Swing Turn Distance Comp)' },
+  { id: 'velPid', title: 'จูน Velocity PID + Feedforward & I2C Bus (Motor.ino)' },
+  { id: 'ekf', title: 'จูน Sensor Fusion PoseEKF (Encoder 4 ล้อ + IMU Yaw)' },
+  { id: 'purePursuit', title: 'จูน Pure Pursuit Path Control (PathControl.ino)' },
   { id: 'servo', title: 'เวลาหน่วงเซอร์โว (Servo Timing)' },
   { id: 'overwrite', title: 'เขียนทับค่า Flash สำรอง (ใช้เมื่อจอเสีย / อ่านค่าผ่านจอไม่ได้)' }
 ];
@@ -574,14 +661,14 @@ export const CONFIG_FIELDS = [
   { section: 'speedInvariant', key: 'moveArriveSpeed', label: 'moveArriveSpeed', hint: 'ความเร็วเข้าเป้าก่อนเบรก (1–40) — ทุกความเร็วจะลดมาเท่านี้ก่อนหยุด', type: 'number', min: 1, max: 60, step: 1, default: DEFAULT_MOTION_CONFIG.moveArriveSpeed },
   { section: 'speedInvariant', key: 'motorMinMoveSpeed', label: 'motorMinMoveSpeed', hint: 'ความเร็วขั้นต่ำที่ล้อเริ่มหมุนจริง (Anti-Stall สำหรับสั่งความเร็ว 1–15)', type: 'number', min: 1, max: 40, step: 1, default: DEFAULT_MOTION_CONFIG.motorMinMoveSpeed },
   { section: 'speedInvariant', key: 'enableEndPositionTrim', label: 'enableEndPositionTrim', hint: 'เติมระยะเดินหน้าเพิ่มด้วย Encoder เฉพาะกรณีหยุดขาด (ไม่ถอยหลัง)', type: 'bool', default: DEFAULT_MOTION_CONFIG.enableEndPositionTrim },
-  { section: 'pd', key: 'fwdKp', label: 'fwdKp', hint: 'สัดส่วนชดเชยความเอียงเดินหน้า FFE (Kp)', type: 'number', step: 0.05, default: DEFAULT_MOTION_CONFIG.fwdKp },
-  { section: 'pd', key: 'fwdKd', label: 'fwdKd', hint: 'ตัวหน่วงลดส่ายเดินหน้า FFE (Kd)', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.fwdKd },
-  { section: 'pd', key: 'bwdKp', label: 'bwdKp', hint: 'สัดส่วนชดเชยความเอียงถอยหลัง BBE (Kp)', type: 'number', step: 0.05, default: DEFAULT_MOTION_CONFIG.bwdKp },
-  { section: 'pd', key: 'bwdKd', label: 'bwdKd', hint: 'ตัวหน่วงลดส่ายถอยหลัง BBE (Kd)', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.bwdKd },
-  { section: 'pd', key: 'kp_turn', label: 'kp_turn', hint: 'ความไวเดินตรงช่วงเตรียมเลี้ยว FC / BC / FFE_turn (Kp)', type: 'number', step: 0.05, default: DEFAULT_MOTION_CONFIG.kp_turn },
-  { section: 'pd', key: 'kd_turn', label: 'kd_turn', hint: 'ตัวหน่วงเดินตรงช่วงเตรียมเลี้ยว FC / BC / FFE_turn (Kd)', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.kd_turn },
-  { section: 'pd', key: 'Set_kp', label: 'Set_kp', hint: 'ความไวจัดแนวเข้าเส้น SetFront / SetBack / SetF / SetB (Kp)', type: 'number', step: 0.05, default: DEFAULT_MOTION_CONFIG.Set_kp },
-  { section: 'pd', key: 'Set_kd', label: 'Set_kd', hint: 'ตัวหน่วงจัดแนวเข้าเส้น SetFront / SetBack / SetF / SetB (Kd)', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.Set_kd },
+  { section: 'pd', key: 'fwdKp', label: 'fwdKp', hint: 'สัดส่วนชดเชยความเอียงเดินหน้า (Kp)', type: 'number', step: 0.05, default: DEFAULT_MOTION_CONFIG.fwdKp },
+  { section: 'pd', key: 'fwdKd', label: 'fwdKd', hint: 'ตัวหน่วงลดส่ายเดินหน้า (Kd)', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.fwdKd },
+  { section: 'pd', key: 'bwdKp', label: 'bwdKp', hint: 'สัดส่วนชดเชยความเอียงถอยหลัง (Kp)', type: 'number', step: 0.05, default: DEFAULT_MOTION_CONFIG.bwdKp },
+  { section: 'pd', key: 'bwdKd', label: 'bwdKd', hint: 'ตัวหน่วงลดส่ายถอยหลัง (Kd)', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.bwdKd },
+  { section: 'pd', key: 'kp_turn', label: 'kp_turn', hint: 'ความไวเดินตรง FC / BC / FC4 / BC4 (Kp)', type: 'number', step: 0.05, default: DEFAULT_MOTION_CONFIG.kp_turn },
+  { section: 'pd', key: 'kd_turn', label: 'kd_turn', hint: 'ตัวหน่วงเดินตรง FC / BC / FC4 / BC4 (Kd)', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.kd_turn },
+  { section: 'pd', key: 'Set_kp', label: 'Set_kp', hint: 'ความไวจัดแนวเข้าเส้น SetF / SetB (Kp)', type: 'number', step: 0.05, default: DEFAULT_MOTION_CONFIG.Set_kp },
+  { section: 'pd', key: 'Set_kd', label: 'Set_kd', hint: 'ตัวหน่วงจัดแนวเข้าเส้น SetF / SetB (Kd)', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.Set_kd },
   { section: 'pd', key: 'kp_time', label: 'kp_time', hint: 'ความไวเดินจับเวลา FF / BB (Kp)', type: 'number', step: 0.05, default: DEFAULT_MOTION_CONFIG.kp_time },
   { section: 'pd', key: 'kd_time', label: 'kd_time', hint: 'ตัวหน่วงเดินจับเวลา FF / BB (Kd)', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.kd_time },
   { section: 'spin', key: 'spinKp', label: 'spinKp', hint: 'ความไวหมุนอยู่กับที่ SpinDegree Kp', type: 'number', step: 0.05, default: DEFAULT_MOTION_CONFIG.spinKp },
@@ -596,12 +683,31 @@ export const CONFIG_FIELDS = [
   { section: 'spin', key: 'turnBackKd', label: 'turnBackKd', hint: 'Pivot ล้อหลัง Kd', type: 'number', step: 0.05, default: DEFAULT_MOTION_CONFIG.turnBackKd },
   { section: 'spin', key: 'turnBackMinSpeed', label: 'turnBackMinSpeed', hint: 'ความเร็วต่ำสุดล้อหลัง', type: 'number', min: 10, max: 100, default: DEFAULT_MOTION_CONFIG.turnBackMinSpeed },
   { section: 'spin', key: 'turnBackMaxSpeed', label: 'turnBackMaxSpeed', hint: 'ความเร็วสูงสุดล้อหลัง', type: 'number', min: 15, max: 100, default: DEFAULT_MOTION_CONFIG.turnBackMaxSpeed },
-  { section: 'spin', key: 'threshold_spinDegree', label: 'threshold_spinDegree', hint: 'ระยะองศาหยุดเข้าเป้า Spin', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.threshold_spinDegree },
+  { section: 'spin', key: 'threshold_spinDegree', label: 'threshold_spinDegree', hint: 'ระยะองศาหยุดเข้าเป้า Spin (แนะนำ 1.5–3.0°)', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.threshold_spinDegree },
   { section: 'spin', key: 'smallAngle_threshold', label: 'smallAngle_threshold', hint: 'องศาที่เริ่มชะลอความเร็วหมุน', type: 'number', step: 1, default: DEFAULT_MOTION_CONFIG.smallAngle_threshold },
-  { section: 'spin', key: 'smallAngle_turnDegree', label: 'smallAngle_turnDegree', hint: 'ความละเอียดหยุด Pivot', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.smallAngle_turnDegree },
+  { section: 'spin', key: 'smallAngle_turnDegree', label: 'smallAngle_turnDegree', hint: 'ความละเอียดหยุด Pivot (แนะนำ 1.5–3.0°)', type: 'number', step: 0.1, default: DEFAULT_MOTION_CONFIG.smallAngle_turnDegree },
   { section: 'turnComp', key: 'enableTurnDistComp', label: 'enableTurnDistComp', hint: 'เปิดชดเชยระยะก่อนเข้าโค้งและหลังออกโค้ง Swing Turn อัตโนมัติ (FC/BC/FC4/BC4)', type: 'bool', default: DEFAULT_MOTION_CONFIG.enableTurnDistComp },
   { section: 'turnComp', key: 'turnEntryCompCm', label: 'turnEntryCompCm', hint: 'ระยะลดก่อนเริ่มเลี้ยว Swing 90° (ซม.) — สเกลอัตโนมัติสำหรับ 45° (x0.414)', type: 'number', min: 0, max: 18, step: 0.1, default: DEFAULT_MOTION_CONFIG.turnEntryCompCm },
   { section: 'turnComp', key: 'turnExitRadiusCm', label: 'turnExitRadiusCm', hint: 'ระยะชดเชยหลังออกโค้ง Swing 90° (ซม.) ที่หักออกจากคำสั่งถัดไป — จุดหมุนแถวล้อหน้าแนะนำ 2.0–3.0 (ตั้ง 0 ได้)', type: 'number', min: 0, max: 18, step: 0.1, default: DEFAULT_MOTION_CONFIG.turnExitRadiusCm },
+  { section: 'velPid', key: 'effectiveTrackCm', label: 'effectiveTrackCm', hint: 'ความกว้างฐานล้อเสมือนจริงสำหรับ Skid-Steer 4 ล้อ (ซม.)', type: 'number', min: 5, max: 40, step: 0.1, default: DEFAULT_MOTION_CONFIG.effectiveTrackCm },
+  { section: 'velPid', key: 'motorI2cDedupMs', label: 'motorI2cDedupMs', hint: 'ช่วงกรองส่งคำสั่ง I2C มอเตอร์ซ้ำ (ms, แนะนำ 12 ms สำหรับ 50–100 Hz)', type: 'number', min: 1, max: 50, step: 1, default: DEFAULT_MOTION_CONFIG.motorI2cDedupMs },
+  { section: 'velPid', key: 'velKs', label: 'velKs', hint: 'Static Friction Feedforward (กำลังขั้นต่ำที่ล้อเริ่มหมุน)', type: 'number', min: 0, max: 40, step: 0.5, default: DEFAULT_MOTION_CONFIG.velKs },
+  { section: 'velPid', key: 'velKv', label: 'velKv', hint: 'Velocity Feedforward Gain (คำสั่งต่อ 1 cm/s)', type: 'number', min: 0, max: 5, step: 0.01, default: DEFAULT_MOTION_CONFIG.velKv },
+  { section: 'velPid', key: 'velKp', label: 'velKp', hint: 'Velocity PID Proportional Gain', type: 'number', min: 0, max: 10, step: 0.05, default: DEFAULT_MOTION_CONFIG.velKp },
+  { section: 'velPid', key: 'velKi', label: 'velKi', hint: 'Velocity PID Integral Gain', type: 'number', min: 0, max: 20, step: 0.1, default: DEFAULT_MOTION_CONFIG.velKi },
+  { section: 'velPid', key: 'velKd', label: 'velKd', hint: 'Velocity PID Derivative Gain', type: 'number', min: 0, max: 2, step: 0.005, default: DEFAULT_MOTION_CONFIG.velKd },
+  { section: 'velPid', key: 'velIntegralLimit', label: 'velIntegralLimit', hint: 'จำกัดเทอม Integral ของ Velocity PID (+/-)', type: 'number', min: 0, max: 60, step: 1, default: DEFAULT_MOTION_CONFIG.velIntegralLimit },
+  { section: 'velPid', key: 'velEmaAlpha', label: 'velEmaAlpha', hint: 'ค่ากรองความเร็วล้อ EMA (0.1–1.0)', type: 'number', min: 0.05, max: 1, step: 0.02, default: DEFAULT_MOTION_CONFIG.velEmaAlpha },
+  { section: 'ekf', key: 'ekfQPos', label: 'ekfQPos', hint: 'Process Noise ตำแหน่ง X/Y (cm²)', type: 'number', min: 0.0001, max: 5, step: 0.005, default: DEFAULT_MOTION_CONFIG.ekfQPos },
+  { section: 'ekf', key: 'ekfQHeadingBase', label: 'ekfQHeadingBase', hint: 'Process Noise มุมขณะวิ่งตรง (rad²)', type: 'number', min: 0.0001, max: 1, step: 0.0005, default: DEFAULT_MOTION_CONFIG.ekfQHeadingBase },
+  { section: 'ekf', key: 'ekfQHeadingTurn', label: 'ekfQHeadingTurn', hint: 'Process Noise มุมขณะเลี้ยว/ล้อไถล (rad² — สูงเพื่อให้เชื่อ IMU มากขึ้น)', type: 'number', min: 0.001, max: 1, step: 0.005, default: DEFAULT_MOTION_CONFIG.ekfQHeadingTurn },
+  { section: 'ekf', key: 'ekfRImuYaw', label: 'ekfRImuYaw', hint: 'Measurement Noise ของ IMU Yaw (rad²)', type: 'number', min: 0.0001, max: 1, step: 0.0005, default: DEFAULT_MOTION_CONFIG.ekfRImuYaw },
+  { section: 'purePursuit', key: 'ppLookaheadMinCm', label: 'ppLookaheadMinCm', hint: 'ระยะมองล่วงหน้าต่ำสุด Lookahead (แนะนำ 10–14 cm)', type: 'number', min: 4, max: 50, step: 0.5, default: DEFAULT_MOTION_CONFIG.ppLookaheadMinCm },
+  { section: 'purePursuit', key: 'ppLookaheadMaxCm', label: 'ppLookaheadMaxCm', hint: 'ระยะมองล่วงหน้าสูงสุด Lookahead (cm)', type: 'number', min: 6, max: 80, step: 0.5, default: DEFAULT_MOTION_CONFIG.ppLookaheadMaxCm },
+  { section: 'purePursuit', key: 'ppLookaheadGain', label: 'ppLookaheadGain', hint: 'สัดส่วนเพิ่ม Lookahead ตามความเร็ว (k_ld)', type: 'number', min: 0, max: 2, step: 0.02, default: DEFAULT_MOTION_CONFIG.ppLookaheadGain },
+  { section: 'purePursuit', key: 'ppMaxLatAccel', label: 'ppMaxLatAccel', hint: 'ความเร่งด้านข้างสูงสุดขณะเข้าโค้ง (cm/s²)', type: 'number', min: 20, max: 500, step: 5, default: DEFAULT_MOTION_CONFIG.ppMaxLatAccel },
+  { section: 'purePursuit', key: 'ppGoalToleranceCm', label: 'ppGoalToleranceCm', hint: 'รัศมีเข้าเป้าจุดสุดท้าย (cm)', type: 'number', min: 1, max: 15, step: 0.5, default: DEFAULT_MOTION_CONFIG.ppGoalToleranceCm },
+  { section: 'purePursuit', key: 'ppWaypointSpacingCm', label: 'ppWaypointSpacingCm', hint: 'ระยะห่างในการแทรก Waypoint (cm)', type: 'number', min: 1.5, max: 15, step: 0.5, default: DEFAULT_MOTION_CONFIG.ppWaypointSpacingCm },
   { section: 'servo', key: 'servoDropDelayMs', label: 'servoDropDelayMs', hint: 'เวลาหน่วงรอหลังสั่งปล่อยเซอร์โว (ms)', type: 'number', min: 50, max: 2000, default: DEFAULT_MOTION_CONFIG.servoDropDelayMs },
   { section: 'overwrite', isToggle: true, key: 'forceOverwriteFlashFromCode', label: 'forceOverwriteFlashFromCode', hint: 'เปิด true เฉพาะเมื่อต้องการเขียนทับค่าใน Flash จากรายการสำรองด้านล่างนี้', type: 'bool' },
   { section: 'overwrite', requiresOverwrite: true, key: 'ticksPerCm', label: 'ticksPerCm', hint: 'จำนวน Ticks ต่อ 1 cm (จากการเข็น 30cm)', type: 'number', step: 0.01 },
@@ -631,8 +737,12 @@ export const SNIPPETS = [
   { code: 'TTF90(80, 25, 33);', desc: 'ตีโค้งหน้า 90° ด้วย Encoder' },
   { code: 'TTB90(25, 80, 33);', desc: 'ตีโค้งถอยหลัง 90° ด้วย Encoder' },
   { code: 'FF(60, 400);', desc: 'เดินหน้าจับเวลา 400 ms' },
+  { code: 'BB(50, 400);', desc: 'ถอยหลังจับเวลา 400 ms' },
+  { code: 'ekfReset(0.0f, 0.0f, 0.0f);', desc: 'รีเซ็ตพิกัด PoseEKF เป็นจุดเริ่มต้น (0, 0, 0°)' },
+  { code: '{ Waypoint _p[] = {{30.0f, 0.0f}, {60.0f, 30.0f}}; followPath(_p, 2, 50.0f, true); }', desc: 'วิ่งตามเส้นทางโค้ง Pure Pursuit' },
+  { code: 'driveWheelVelocitiesCmPs(40.0f, 40.0f);', desc: 'คุมความเร็วล้อซ้าย-ขวาหน่วย cm/s (Velocity PID+FF)' },
   { code: 'SetF(25, 10.0f);', desc: 'จัดแนวเส้นหน้าแล้วถอย 10 cm' },
-  { code: 'DropF(30);', desc: 'เข้าเส้นหน้า (SetFront_drop) -> ปล่อยลูกบาศก์' },
-  { code: 'DropB(30);', desc: 'เข้าเส้นหลัง (SetBack_drop) -> ปล่อยลูกบาศก์' },
-  { code: 'STOP();', desc: 'หยุดรอปุ่ม A/B แล้วรีเซ็ต Yaw' }
+  { code: 'DropF(30);', desc: 'เข้าเส้นหน้า -> ปล่อยลูกบาศก์หน้า' },
+  { code: 'DropB(30);', desc: 'เข้าเส้นหลัง -> ปล่อยลูกบาศก์หลัง' },
+  { code: 'STOP();', desc: 'หยุดรอปุ่ม A/B แล้วรีเซ็ต Yaw & EKF' }
 ];

@@ -1,5 +1,8 @@
 // ============================================================================
-// SpinTurn.ino — คำสั่งหมุนและเลี้ยวแยก (อ้างอิงตาม SpinFunction.ino ของ PT_MIDDLE_ENC_2026Endcode4MOV1)
+// SpinTurn.ino — คำสั่งหมุน/เลี้ยว Gyro (SpinDegree, TrunDegreeFront, TrunDegreeBack)
+//                และตีโค้งด้วย Encoder (TTF90/45, TTB90/45) + Auto-Tune + EKF
+//   - ใช้ Derivative-on-Measurement (ความเร็วเชิงมุม deg/s จริง) ลดอาการเลี้ยวส่าย
+//   - รองรับ Swing Turn ต่อเนื่อง (stopAtEnd = false) ไม่สลับล้อฝั่งตรงข้ามให้ส่าย
 // ============================================================================
 
 // 0=OK, 1=USER_CANCEL, 2=IMU_FROZEN, 3=TIMEOUT, 4=WRONG_DIR
@@ -11,13 +14,36 @@ int autoTuneGetLastFault() {
 }
 
 static float wrapDeg180(float deg) {
-    while (deg > 180.0f)  deg -= 360.0f;
+    while (deg >  180.0f) deg -= 360.0f;
     while (deg < -180.0f) deg += 360.0f;
     return deg;
 }
 
+static void updateYawRateDegPs(float yaw, float &prevYaw, unsigned long &prevYawUs, float &omegaDegPs) {
+    unsigned long nowUs = micros();
+    unsigned long dtUs  = nowUs - prevYawUs;
+    float dYaw          = wrapDeg180(yaw - prevYaw);
+    if ((fabsf(dYaw) > 0.01f && dtUs >= 4000UL) || dtUs >= 12000UL) {
+        float dtSec    = max(0.004f, (float)dtUs * 1e-6f);
+        float rawOmega = constrain(dYaw / dtSec, -720.0f, 720.0f);
+        omegaDegPs     = 0.45f * rawOmega + 0.55f * omegaDegPs;
+        prevYaw        = yaw;
+        prevYawUs      = nowUs;
+    }
+}
+
+static void writeSwingTurnMotors(bool isBack, bool turnRight, int outerCmd, int innerCmd) {
+    if (!isBack) {
+        if (turnRight) safeMotorWrite4(outerCmd, outerCmd, innerCmd, innerCmd);
+        else           safeMotorWrite4(innerCmd, innerCmd, outerCmd, outerCmd);
+    } else {
+        if (turnRight) safeMotorWrite4(-innerCmd, -innerCmd, -outerCmd, -outerCmd);
+        else           safeMotorWrite4(-outerCmd, -outerCmd, -innerCmd, -innerCmd);
+    }
+}
+
 // ============================================================================
-// spinDegree (หมุนอยู่กับที่ตามมุมสัมพัทธ์ด้วย Gyro PD)
+// SpinDegree (หมุนอยู่กับที่ตามมุมสัมพัทธ์ด้วย Velocity-Damped Gyro PD)
 // ============================================================================
 static void spinDegreeCore(float relative_degree, float threshold, int maxSpeedOverride,
                            bool stopAtEnd, bool notifyHud) {
@@ -26,15 +52,18 @@ static void spinDegreeCore(float relative_degree, float threshold, int maxSpeedO
     const int max_speed = (maxSpeedOverride > 0)
                               ? max(min_speed, constrain(abs(maxSpeedOverride), min_speed, 100))
                               : spinMaxSpeed;
-    const unsigned long settle_time = spinPostDelayMs;
-    const float kp = spinKp;
-    const float kd = spinKd;
+    const unsigned long settle_time   = spinPostDelayMs;
+    const float kp                    = spinKp;
+    const float kd                    = spinKd;
     const float small_angle_threshold = smallAngle_threshold;
-    const float stop_threshold = threshold;
+    const float stop_threshold        = threshold;
 
     unsigned long stable_timer = 0;
-    float previous_error = 0.0f;
     current_degree = wrapDeg180(current_degree + relative_degree);
+
+    float prevYaw           = safeReadYaw();
+    unsigned long prevYawUs = micros();
+    float omegaDegPs        = 0.0f;
 
     if (notifyHud) {
         char cmdBuf[24];
@@ -44,8 +73,9 @@ static void spinDegreeCore(float relative_degree, float threshold, int maxSpeedO
 
     unsigned long startMs = millis();
     while (true) {
-        serviceNonBlockingBeep();
         missionUpdateTimerHUD();
+        ekfUpdate();
+
         if (s_tuneActive && (readSwitch(A) || readSwitch(B))) {
             driveStop();
             s_tuneFault = 1;
@@ -58,45 +88,44 @@ static void spinDegreeCore(float relative_degree, float threshold, int maxSpeedO
         }
 
         float yaw = safeReadYaw();
-        float error = wrapDeg180(current_degree - yaw);
-        float derivative = error - previous_error;
-        int pd_value = (int)((error * kp) + (derivative * kd));
-        if (pd_value > max_speed) pd_value = max_speed;
-        else if (pd_value < -max_speed) pd_value = -max_speed;
+        updateYawRateDegPs(yaw, prevYaw, prevYawUs, omegaDegPs);
+
+        float error   = wrapDeg180(current_degree - yaw);
+        float pd_f    = (error * kp) - (omegaDegPs * kd);
+        int pd_value  = constrain((int)roundf(pd_f), -max_speed, max_speed);
 
         if (fabsf(error) <= stop_threshold) {
             if (!stopAtEnd) {
                 break;
             }
             driveStop();
-            if (stable_timer == 0) {
-                stable_timer = millis();
-            }
-            if (millis() - stable_timer >= settle_time) {
-                break;
+            if (fabsf(omegaDegPs) < 35.0f) {
+                if (stable_timer == 0) {
+                    stable_timer = millis();
+                }
+                if (millis() - stable_timer >= settle_time) {
+                    break;
+                }
+            } else {
+                stable_timer = 0;
             }
         } else {
             stable_timer = 0;
-            if (fabsf(error) < small_angle_threshold && abs(pd_value) < min_speed) {
+            if (fabsf(error) < small_angle_threshold &&
+                fabsf(omegaDegPs) < 40.0f &&
+                abs(pd_value) < min_speed &&
+                (pd_f * error >= 0.0f)) {
                 pd_value = (error > 0.0f) ? min_speed : -min_speed;
             }
             safeMotorWrite4(pd_value, pd_value, -pd_value, -pd_value);
         }
-        previous_error = error;
         delay(1);
     }
 
+    ekfUpdate();
     if (stopAtEnd && notifyHud && s_tuneFault == 0) {
         missionFinishCommandBeep();
     }
-}
-
-void spinDegree(int relative_degree) {
-    spinDegree(relative_degree, threshold_spinDegree);
-}
-
-void spinDegree(int relative_degree, float threshold) {
-    spinDegreeCore((float)relative_degree, threshold, -1, true, true);
 }
 
 void SpinDegree(float relativeDeg, int maxSpeed, bool stopAtEnd) {
@@ -104,7 +133,7 @@ void SpinDegree(float relativeDeg, int maxSpeed, bool stopAtEnd) {
 }
 
 // ============================================================================
-// turnDegreeFront / turnDegreeBack (เลี้ยวเหวี่ยงล้อหน้า / ล้อหลังด้วย Gyro PD)
+// TrunDegreeFront / TrunDegreeBack (เลี้ยวเหวี่ยงล้อหน้า / ล้อหลังเร็วและนิ่ง)
 // ============================================================================
 static void turnDegreeCore(float relative_degree, float threshold, int maxSpeedOverride,
                            bool stopAtEnd, bool isBack, bool notifyHud) {
@@ -113,14 +142,18 @@ static void turnDegreeCore(float relative_degree, float threshold, int maxSpeedO
     const int max_speed = (maxSpeedOverride > 0)
                               ? max(min_speed, constrain(abs(maxSpeedOverride), min_speed, 100))
                               : (isBack ? turnBackMaxSpeed : turnFrontMaxSpeed);
-    const float kp = isBack ? turnBackKp : turnFrontKp;
-    const float kd = isBack ? turnBackKd : turnFrontKd;
+    const float kp             = isBack ? turnBackKp : turnFrontKp;
+    const float kd             = isBack ? turnBackKd : turnFrontKd;
     const float stop_threshold = threshold;
-    const unsigned long stable_time = 0;
+    const float turnSign       = (relative_degree >= 0.0f) ? 1.0f : -1.0f;
+    const float innerRatio     = constrain(turnInnerRatio, -0.5f, 0.8f);
 
     unsigned long stable_timer = 0;
     current_degree = wrapDeg180(current_degree + relative_degree);
-    float previous_error = wrapDeg180(current_degree - safeReadYaw());
+
+    float prevYaw           = safeReadYaw();
+    unsigned long prevYawUs = micros();
+    float omegaDegPs        = 0.0f;
 
     if (notifyHud) {
         char cmdBuf[24];
@@ -132,8 +165,9 @@ static void turnDegreeCore(float relative_degree, float threshold, int maxSpeedO
 
     unsigned long startMs = millis();
     while (true) {
-        serviceNonBlockingBeep();
         missionUpdateTimerHUD();
+        ekfUpdate();
+
         if (s_tuneActive && (readSwitch(A) || readSwitch(B))) {
             driveStop();
             s_tuneFault = 1;
@@ -146,38 +180,74 @@ static void turnDegreeCore(float relative_degree, float threshold, int maxSpeedO
         }
 
         float yaw = safeReadYaw();
-        float error = wrapDeg180(current_degree - yaw);
-        float derivative = error - previous_error;
-        int pd_value = (int)fabsf((error * kp) + (derivative * kd));
-        if (pd_value > max_speed) pd_value = max_speed;
-        if (pd_value < min_speed) pd_value = min_speed;
+        updateYawRateDegPs(yaw, prevYaw, prevYawUs, omegaDegPs);
 
-        if (fabsf(error) <= stop_threshold) {
-            if (stopAtEnd) {
-                driveStop();
-            }
-            if (stable_timer == 0) {
-                stable_timer = millis();
-            }
-            if (millis() - stable_timer >= stable_time) {
+        float error = wrapDeg180(current_degree - yaw);
+        float pd_f  = (error * kp) - (omegaDegPs * kd);
+
+        if (!stopAtEnd) {
+            // โหมดเลี้ยวต่อเนื่อง (FC/BC(..., 'R'/'L')): ห้ามหยุดเด็ดขาด — ใช้การเกลี่ยล้อเข้าแนวตรงต่อเนื่อง
+            float remaining  = error * turnSign;
+            float omegaAlong = omegaDegPs * turnSign;
+            float leadDeg    = constrain(omegaAlong * 0.012f, 0.0f, 2.5f);
+            if (remaining <= max(stop_threshold, 1.5f) + leadDeg) {
                 break;
             }
-        } else {
-            stable_timer = 0;
-            if (!isBack) {
-                if (error > 0.0f) safeMotorWrite4(pd_value, pd_value, 0, 0);
-                else              safeMotorWrite4(0, 0, pd_value, pd_value);
+            const int baseFlow = max(min_speed, 45);
+            int steer = constrain((int)roundf(pd_f * turnSign), -20, max_speed);
+            if (steer >= min_speed) {
+                int innerCmd = (int)roundf((float)steer * innerRatio);
+                writeSwingTurnMotors(isBack, turnSign > 0.0f, steer, innerCmd);
+            } else if (steer > 0) {
+                int outerCmd = baseFlow;
+                int innerCmd = max(0, baseFlow - steer);
+                writeSwingTurnMotors(isBack, turnSign > 0.0f, outerCmd, innerCmd);
             } else {
-                if (error > 0.0f) safeMotorWrite4(0, 0, -pd_value, -pd_value);
-                else              safeMotorWrite4(-pd_value, -pd_value, 0, 0);
+                // โมเมนตัมหมุนพาเข้าเป้าแล้ว: เกลี่ยทั้งสองฝั่งวิ่งต่อเนื่องพร้อมหน่วงมุมไม่ให้เลยเป้า
+                int damp     = min(18, -steer);
+                int outerCmd = max(12, baseFlow - damp);
+                int innerCmd = min(max_speed, baseFlow + damp);
+                writeSwingTurnMotors(isBack, turnSign > 0.0f, outerCmd, innerCmd);
+            }
+        } else {
+            // โหมดเลี้ยวแล้วหยุด (TrunDegreeFront / TrunDegreeBack)
+            if (fabsf(error) <= stop_threshold && fabsf(omegaDegPs) < 35.0f) {
+                driveStop();
+                if (stable_timer == 0) {
+                    stable_timer = millis();
+                }
+                if (millis() - stable_timer >= 25UL) {
+                    break;
+                }
+            } else {
+                stable_timer = 0;
+                if (error * turnSign < 0.0f && fabsf(error) > stop_threshold) {
+                    // หากเลยเป้าเล็กน้อย แก้มุมกลับอยู่กับที่อย่างสมมาตร (ไม่ส่ายสลับข้าง)
+                    int trim = constrain((int)roundf(pd_f), -(max_speed / 2), max_speed / 2);
+                    if (fabsf(omegaDegPs) < 35.0f && abs(trim) < spinMinSpeed && (pd_f * error >= 0.0f)) {
+                        trim = (error > 0.0f) ? spinMinSpeed : -spinMinSpeed;
+                    }
+                    safeMotorWrite4(trim, trim, -trim, -trim);
+                } else if (pd_f * error <= 0.0f) {
+                    safeMotorStop();
+                } else {
+                    int floorSpd = (fabsf(omegaDegPs) < 40.0f) ? min_speed : 0;
+                    int cmd      = constrain((int)roundf(fabsf(pd_f)), floorSpd, max_speed);
+                    if (cmd == 0) {
+                        safeMotorStop();
+                    } else {
+                        int innerCmd = (int)roundf((float)cmd * innerRatio);
+                        writeSwingTurnMotors(isBack, error > 0.0f, cmd, innerCmd);
+                    }
+                }
             }
         }
-        previous_error = error;
         delay(1);
     }
 
+    ekfUpdate();
     if (!stopAtEnd && s_tuneFault == 0) {
-        notifyTurnFlowExit(isBack ? -1 : 1, max(min_speed, 50));
+        notifyTurnFlowExit(isBack ? -1 : 1, max(min_speed, 65));
     }
 
     if (stopAtEnd && notifyHud && s_tuneFault == 0) {
@@ -185,24 +255,8 @@ static void turnDegreeCore(float relative_degree, float threshold, int maxSpeedO
     }
 }
 
-void turnDegreeFront(int relative_degree) {
-    turnDegreeFront(relative_degree, smallAngle_turnDegree);
-}
-
-void turnDegreeFront(int relative_degree, float threshold) {
-    turnDegreeCore((float)relative_degree, threshold, -1, true, false, true);
-}
-
 void TrunDegreeFront(float relativeDeg, int maxSpeed, bool stopAtEnd) {
     turnDegreeCore(relativeDeg, smallAngle_turnDegree, maxSpeed, stopAtEnd, false, true);
-}
-
-void turnDegreeBack(int relative_degree) {
-    turnDegreeBack(relative_degree, smallAngle_turnDegree);
-}
-
-void turnDegreeBack(int relative_degree, float threshold) {
-    turnDegreeCore((float)relative_degree, threshold, -1, true, true, true);
 }
 
 void TrunDegreeBack(float relativeDeg, int maxSpeed, bool stopAtEnd) {
@@ -211,7 +265,6 @@ void TrunDegreeBack(float relativeDeg, int maxSpeed, bool stopAtEnd) {
 
 // ============================================================================
 // กลุ่มตีโค้งด้วย Encoder ล้วน: TTF90, TTF45, TTB90, TTB45
-// (ตรงตาม SpinFunction.ino ของ PT_MIDDLE_ENC_2026Endcode4MOV1)
 // หมายเหตุ: TTB90 / TTB45 รับพารามิเตอร์เรียง (speed_right, speed_left, distance_cm)
 // ============================================================================
 static void ttCurveCore(int speed_left, int speed_right, long distance_cm,
@@ -240,13 +293,14 @@ static void ttCurveCore(int speed_left, int speed_right, long distance_cm,
     int mR = isBack ? -speed_right : speed_right;
     unsigned long startMs = millis();
     while (readEncoderSingleDistance(chanel_encoder) < target_ticks) {
-        serviceNonBlockingBeep();
         missionUpdateTimerHUD();
+        ekfUpdate();
         safeMotorWrite4(mL, mL, mR, mR);
         if (millis() - startMs >= 5000UL) break;
         delay(1);
     }
     driveStop();
+    ekfUpdate();
     missionFinishCommandBeep();
 }
 
@@ -313,6 +367,7 @@ void autoTuneSpinAndTurn(float &outSpinErr, float &outTurnErr,
     setAngleOffset();
     delay(10);
     current_degree = 0.0f;
+    ekfSnapHeadingDeg(0.0f);
     if (!tunePauseMs(150)) { s_tuneActive = false; return; }
 
     if (onProgress) onProgress("SPIN TEST +90", 20, 0.0f);
@@ -367,6 +422,7 @@ void autoTuneSpinAndTurn(float &outSpinErr, float &outTurnErr,
     driveStop();
     setAngleOffset();
     current_degree = 0.0f;
+    ekfSnapHeadingDeg(0.0f);
     if (s_tuneFault == 0) {
         configSave();
     } else {

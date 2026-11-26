@@ -138,17 +138,89 @@ float readAngle(byte axis);
 void beepSound(int durationMs);
 void maxBeep(int durationMs);
 
+// --- โครงสร้างจุดพิกัดสำหรับ PathControl (Pure Pursuit) ---
+struct Waypoint {
+    float x;
+    float y;
+};
+
 // --- Prototype ฟังก์ชันหลัก (สำหรับเรียกใช้งานข้ามแท็บ .ino ในสเก็ตช์) ---
 extern int frontLock;
 extern int backLock;
+
+// Config & Calibration
 void setupEncodersPT();
 void enableCodeMotionDefaults();
 void configSetCodeMotionDefaults(bool enabled);
-void clearTurnDistCarry();
+void configLoad();
+void configSave();
+void configPrintCalibrationJson();
+void serviceSerialCalibrationCommand();
+bool configSaveEncoderCalibration();
+bool configSaveMotorTrim();
+
+// Motor, Encoder & Velocity PID+FF
+void readPtEncoders(long counts[4]);
+void safeMotorWrite4(int m1, int m2, int m3, int m4);
+void safeMotorWrite2(int leftSpeed, int rightSpeed);
+void safeMotorStop();
+float safeReadYaw();
+void motorWriteSpeedBalanced(int leftCommand, int rightCommand);
+void driveMotors(int leftSpeed, int rightSpeed);
+void driveStop();
+void resetMoveSpeedBalance();
+void resetVelocityPid();
+void updateWheelVelocitiesCmPs();
+void getWheelVelocitiesCmPs(float outVel[4]);
+float getLeftVelocityCmPs();
+float getRightVelocityCmPs();
+float getRobotLinearVelocityCmPs();
+void driveWheelVelocitiesCmPs(float targetLeftCmPs, float targetRightCmPs);
+long encoderCentimetersToTicks(float distance_cm, int speed);
+long readEncoderDistance();
 long readEncoderSignedDistance(bool forward);
+long readEncoderSingleDistance(byte encoder_index);
+void resetEncoder();
 float getBoxDistCm(int boxNum);
 float BOX(float boxes);
 float mapFieldCmToRobotCm(float fieldCm);
+void readLine();
+bool isLineDetected(byte sensorIndex);
+
+// PoseEKF (4-Wheel Odometry + IMU Yaw Sensor Fusion)
+void ekfInit(float xCm = 0.0f, float yCm = 0.0f, float headingDeg = 0.0f);
+void ekfReset(float xCm = 0.0f, float yCm = 0.0f, float headingDeg = 0.0f);
+void ekfSyncEncoders();
+void ekfUpdate();
+void ekfSnapHeadingDeg(float headingDeg);
+void ekfSnapPose(float xCm, float yCm, float headingDeg);
+float ekfGetX();
+float ekfGetY();
+float ekfGetHeadingDeg();
+float ekfGetHeadingRad();
+float ekfGetLinearVel();
+float ekfGetAngularVel();
+
+// PathControl (Adaptive Pure Pursuit)
+bool followPath(const Waypoint* pts, int count, float maxSpeedCmPs,
+                bool stopAtEnd = true, bool reverse = false, unsigned long timeoutMs = 15000UL);
+bool followWaypoints(const float* xs, const float* ys, int count, float maxSpeedCmPs,
+                     bool stopAtEnd = true, bool reverse = false, unsigned long timeoutMs = 15000UL);
+
+// Move HUD, Flow & Reset
+void clearTurnDistCarry();
+void setTurnDistCarry(float signedCm);
+void clearMotionFlowState();
+void notifyTurnFlowExit(int dirSign, int carrySpeed);
+void resetTargetYaw();
+void missionStartTimer(int modeNum);
+void missionEndTimer();
+unsigned long missionElapsedMs();
+void missionUpdateTimerHUD();
+void missionFinishCommandBeep();
+void missionNotifyCommand(const char* cmdText, int iconId = 0, const char* subText = nullptr);
+
+// FC-Only Encoder Motion (FC_BOX / BC_BOX / FC / BC / FC4 / BC4)
 void FC_BOX(int speed, float boxes, bool stopAtEnd = false);
 void FC_BOX(int speed, float boxes, char dir);
 void FC_BOX(int speed, float boxes, int select);
@@ -161,6 +233,7 @@ void BC_BOX(int speed, float boxes, int select);
 void BC_BOX(int speed, float boxes, const char* select);
 void BC_BOX(int speed, float boxes, char dir, bool stopBeforeTurn);
 void BC_BOX(int speed, float boxes, const char* select, bool stopBeforeTurn);
+
 void FC(int speed, float cm, bool stopAtEnd = false);
 void FC(int speed, float cm, char dir);
 void FC(int speed, float cm, int select);
@@ -171,6 +244,7 @@ void FC(int speed, float cm, int rUp, int rDown);
 void FC(int speed, float cm, char dir, unsigned long rUp, long rDown);
 void FC(int speed, float cm, int select, unsigned long rUp, long rDown);
 void FC(int speed, float cm, const char* select, unsigned long rUp, long rDown);
+
 void BC(int speed, float cm, bool stopAtEnd = false);
 void BC(int speed, float cm, char dir);
 void BC(int speed, float cm, int select);
@@ -181,79 +255,28 @@ void BC(int speed, float cm, int rUp, int rDown);
 void BC(int speed, float cm, char dir, unsigned long rUp, long rDown);
 void BC(int speed, float cm, int select, unsigned long rUp, long rDown);
 void BC(int speed, float cm, const char* select, unsigned long rUp, long rDown);
+
 void FC4(int speed, float cm, char dir);
 void FC4(int speed, float cm, char dir, bool stopBeforeTurn);
 void BC4(int speed, float cm, char dir);
 void BC4(int speed, float cm, char dir, bool stopBeforeTurn);
-void FFE(int speed, long encoder_target);
-void FFE(int speed, long encoder_target, unsigned long rUp, long rDown);
-void FFE(int speed, long encoder_target, char select);
-void FFE(int speed, long encoder_target, char select, unsigned long rUp, long rDown);
-void BBE(int speed, long encoder_target);
-void BBE(int speed, long encoder_target, unsigned long rUp, long rDown);
-void BBE(int speed, long encoder_target, char select);
-void BBE(int speed, long encoder_target, char select, unsigned long rUp, long rDown);
-void FFE_turn(int speed, long encoder_target);
-void FFE_turn(int speed, long encoder_target, char select);
-void FFE_turn(int speed, long encoder_target, int select);
-void FFE_turn(int speed, long encoder_target, const char* select);
-void FFE_turn(int speed, long encoder_target, unsigned long rUp, long rDown);
-void FFE_turn(int speed, long encoder_target, char select, unsigned long rUp, long rDown);
-void FFE_turn(int speed, long encoder_target, int select, unsigned long rUp, long rDown);
-void FFE_turn(int speed, long encoder_target, const char* select, unsigned long rUp, long rDown);
-void BBE_turn(int speed, long encoder_target);
-void BBE_turn(int speed, long encoder_target, char select);
-void BBE_turn(int speed, long encoder_target, int select);
-void BBE_turn(int speed, long encoder_target, const char* select);
-void BBE_turn(int speed, long encoder_target, unsigned long rUp, long rDown);
-void BBE_turn(int speed, long encoder_target, char select, unsigned long rUp, long rDown);
-void BBE_turn(int speed, long encoder_target, int select, unsigned long rUp, long rDown);
-void BBE_turn(int speed, long encoder_target, const char* select, unsigned long rUp, long rDown);
+
+// Time-Based Move (FF / BB)
 void FF(int speed, unsigned long timer);
 void FF(int speed, unsigned long timer, unsigned long rUp, unsigned long rDown);
-void FF(int speed, unsigned long timer, char select);
-void FF_turn(int speed, unsigned long timer);
-void FF_turn(int speed, unsigned long timer, char select);
-void FF_turn(int speed, unsigned long timer, int select);
-void FF_turn(int speed, unsigned long timer, const char* select);
 void BB(int speed, unsigned long timer);
 void BB(int speed, unsigned long timer, unsigned long rUp, unsigned long rDown);
-void BB(int speed, unsigned long timer, char select);
-void BB_turn(int speed, unsigned long timer);
-void BB_turn(int speed, unsigned long timer, char select);
-void BB_turn(int speed, unsigned long timer, int select);
-void BB_turn(int speed, unsigned long timer, const char* select);
-void spinDegree(int relative_degree);
-void spinDegree(int relative_degree, float threshold);
+
+// Gyro Spin & Swing Turn + Encoder Curves
 void SpinDegree(float relativeDeg, int maxSpeed = -1, bool stopAtEnd = true);
-void turnDegreeFront(int relative_degree);
-void turnDegreeFront(int relative_degree, float threshold);
 void TrunDegreeFront(float relativeDeg, int maxSpeed = -1, bool stopAtEnd = true);
-void turnDegreeBack(int relative_degree);
-void turnDegreeBack(int relative_degree, float threshold);
 void TrunDegreeBack(float relativeDeg, int maxSpeed = -1, bool stopAtEnd = true);
 void TTF90(int speed_left, int speed_right, long distance_cm);
 void TTF45(int speed_left, int speed_right, long distance_cm);
 void TTB90(int speed_right, int speed_left, long distance_cm);
 void TTB45(int speed_right, int speed_left, long distance_cm);
-bool SetFront_Yaw(int speed);
-bool SetFront_Yaw(int speed, unsigned long target);
-bool SetFront_Yaw(int speed, unsigned long target, char select);
-bool SetBack_Yaw(int speed);
-bool SetBack_Yaw(int speed, unsigned long target);
-bool SetBack_Yaw(int speed, unsigned long target, char select);
-void SetFront(int speed);
-void SetFront(int speed, unsigned long target);
-void SetFront(int speed, unsigned long target, char select);
-void SetFront_drop(int speed);
-void SetFront_time(int speed, unsigned long timer);
-void SetFront_time(int speed, unsigned long target, char select);
-void SetBack(int speed);
-void SetBack(int speed, unsigned long target);
-void SetBack(int speed, unsigned long target, char select);
-void SetBack_drop(int speed);
-void SetBack_time(int speed, unsigned long timer);
-void SetBack_time(int speed, unsigned long target, char select);
+
+// Line Alignment, Drop & Stop
 void SetF(int speed = 25);
 void SetF(int speed, float backCm);
 void SetF(int speed, float backCm, char dir);
@@ -265,4 +288,3 @@ void DropF(int speed);
 void DropB();
 void DropB(int speed);
 void STOP();
-void missionNotifyCommand(const char* cmdText, int iconId = 0, const char* subText = nullptr);

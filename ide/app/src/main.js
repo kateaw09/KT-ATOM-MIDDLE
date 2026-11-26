@@ -835,6 +835,21 @@ function parseLineToBlock(line) {
     };
   }
 
+  const pathMatch = line.match(/^\{\s*Waypoint\s+_p\[\]\s*=\s*\{(.+?)\};\s*followPath\(\s*_p\s*,\s*\d+\s*,\s*([^,)]+)(?:\s*,\s*([^)]+))?\)\s*;\s*\}$/);
+  if (pathMatch) {
+    const pairMatches = [...pathMatch[1].matchAll(/\{\s*([^,}]+?)\s*,\s*([^}]+?)\s*\}/g)];
+    const cleanNum = (s) => String(s || '0').trim().replace(/f$/i, '');
+    const ptsText = pairMatches.map((pm) => `${cleanNum(pm[1])},${cleanNum(pm[2])}`).join('; ');
+    return {
+      type: 'FOLLOW_PATH',
+      params: {
+        points: ptsText || '30,0; 60,30',
+        speed: parseArg(pathMatch[2], 50),
+        stop: pathMatch[3] !== undefined ? parseArg(pathMatch[3], true) : true
+      }
+    };
+  }
+
   const m = line.match(/^([A-Za-z_]\w*)\s*\(([^;]*)\)\s*;(?:\s*\/\/(.*))?$/);
   if (!m) return { type: 'RAW', params: { raw: line } };
   const fn = m[1];
@@ -891,9 +906,9 @@ function parseLineToBlock(line) {
     return { type: 'BC_BOX_DIR', params: { speed: parseArg(args[0], 50), boxes: parseArg(args[1], 1), dir: dirVal } };
   }
 
-  if ((fn === 'SpinDegree' || fn === 'spinDegree') && args.length === 1) return { type: 'SPIN', params: { deg: parseArg(args[0], 90) } };
-  if ((fn === 'TrunDegreeFront' || fn === 'turnDegreeFront') && args.length === 1) return { type: 'TURN_F', params: { deg: parseArg(args[0], 90) } };
-  if ((fn === 'TrunDegreeBack' || fn === 'turnDegreeBack') && args.length === 1) return { type: 'TURN_B', params: { deg: parseArg(args[0], 90) } };
+  if (fn === 'SpinDegree' && args.length === 1) return { type: 'SPIN', params: { deg: parseArg(args[0], 90) } };
+  if (fn === 'TrunDegreeFront' && args.length === 1) return { type: 'TURN_F', params: { deg: parseArg(args[0], 90) } };
+  if (fn === 'TrunDegreeBack' && args.length === 1) return { type: 'TURN_B', params: { deg: parseArg(args[0], 90) } };
 
   if (fn === 'TTF90' && args.length === 3) return { type: 'TTF90', params: { spdL: parseArg(args[0], 80), spdR: parseArg(args[1], 25), cm: parseArg(args[2], 33) } };
   if (fn === 'TTF45' && args.length === 3) return { type: 'TTF45', params: { spdL: parseArg(args[0], 80), spdR: parseArg(args[1], 25), cm: parseArg(args[2], 17) } };
@@ -903,17 +918,20 @@ function parseLineToBlock(line) {
   if (fn === 'FF' && args.length === 2) return { type: 'FF_TIME', params: { speed: parseArg(args[0], 60), ms: parseArg(args[1], 400) } };
   if (fn === 'BB' && args.length === 2) return { type: 'BB_TIME', params: { speed: parseArg(args[0], 50), ms: parseArg(args[1], 400) } };
 
-  if ((fn === 'SetF' || fn === 'SetFront_Yaw') && args.length === 1) return { type: 'SETF', params: { speed: parseArg(args[0], 25) } };
-  if ((fn === 'SetF' || fn === 'SetFront_Yaw') && args.length === 2) return { type: 'SETF_BACK', params: { speed: parseArg(args[0], 25), cm: parseArg(args[1], 10) } };
-  if ((fn === 'SetF' || fn === 'SetFront_Yaw') && args.length === 3) {
+  if (fn === 'ekfReset' && args.length === 3) return { type: 'EKF_RESET', params: { x: parseArg(args[0], 0), y: parseArg(args[1], 0), deg: parseArg(args[2], 0) } };
+  if (fn === 'driveWheelVelocitiesCmPs' && args.length === 2) return { type: 'VEL_DRIVE', params: { vL: parseArg(args[0], 40), vR: parseArg(args[1], 40) } };
+
+  if (fn === 'SetF' && args.length === 1) return { type: 'SETF', params: { speed: parseArg(args[0], 25) } };
+  if (fn === 'SetF' && args.length === 2) return { type: 'SETF_BACK', params: { speed: parseArg(args[0], 25), cm: parseArg(args[1], 10) } };
+  if (fn === 'SetF' && args.length === 3) {
     const rawDir = parseArg(args[2], 'R');
     const dir = rawDir === 'r' ? 'R' : rawDir === 'l' ? 'L' : rawDir;
     return { type: 'SETF_DIR', params: { speed: parseArg(args[0], 25), cm: parseArg(args[1], 10), dir } };
   }
 
-  if ((fn === 'SetB' || fn === 'SetBack_Yaw') && args.length === 1) return { type: 'SETB', params: { speed: parseArg(args[0], 25) } };
-  if ((fn === 'SetB' || fn === 'SetBack_Yaw') && args.length === 2) return { type: 'SETB_FWD', params: { speed: parseArg(args[0], 25), cm: parseArg(args[1], 10) } };
-  if ((fn === 'SetB' || fn === 'SetBack_Yaw') && args.length === 3) {
+  if (fn === 'SetB' && args.length === 1) return { type: 'SETB', params: { speed: parseArg(args[0], 25) } };
+  if (fn === 'SetB' && args.length === 2) return { type: 'SETB_FWD', params: { speed: parseArg(args[0], 25), cm: parseArg(args[1], 10) } };
+  if (fn === 'SetB' && args.length === 3) {
     const rawDir = parseArg(args[2], 'L');
     const dir = rawDir === 'r' ? 'R' : rawDir === 'l' ? 'L' : rawDir;
     return { type: 'SETB_DIR', params: { speed: parseArg(args[0], 25), cm: parseArg(args[1], 10), dir } };

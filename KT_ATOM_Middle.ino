@@ -28,11 +28,14 @@ void setup() {
     // 3. โหลดค่าที่คาลิเบรตไว้จาก Flash (ไม่เขียนทับค่า Assembly เว้นแต่เปิดใน Config.ino)
     configLoad();
 
-    // 4. ตั้งเซอร์โวหน้า-หลังให้อยู่ตำแหน่ง Lock ตลอดเมื่อเริ่มต้น
+    // 4. เริ่มต้นระบบคำนวณพิกัด PoseEKF (4-Wheel Odometry + IMU Yaw)
+    ekfInit(0.0f, 0.0f, 0.0f);
+
+    // 5. ตั้งเซอร์โวหน้า-หลังให้อยู่ตำแหน่ง Lock ตลอดเมื่อเริ่มต้น
     setServoAngle(SERVO_S0, frontLock);
     setServoAngle(SERVO_S1, backLock);
 
-    // 5. เข้าสู่หน้าจอ UI (กด SW A ค้างตอนเปิดเครื่อง = Assembly Mode, ปกติ = Ready-to-Run)
+    // 6. เข้าสู่หน้าจอ UI (กด SW A ค้างตอนเปิดเครื่อง = Assembly Mode, ปกติ = Ready-to-Run)
     interfaceBegin();
 }
 

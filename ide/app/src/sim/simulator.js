@@ -1,7 +1,7 @@
 'use strict';
 
 import { evalExpression, resolveDirValue } from '../blocks/expressionAst.js';
-import { MISSION_SECTIONS } from '../blocks/definitions.js';
+import { MISSION_SECTIONS, parseWaypointListText } from '../blocks/definitions.js';
 import { render2DFieldGrid, renderIsometricGrid } from './fieldRenderer.js';
 import { getCellOccupancyMap, getElevationAtCm, resolveTileSemantics } from './fieldTiles.js';
 
@@ -152,6 +152,12 @@ export function buildSimSegments(state, overrideOpts = null) {
   let x = (grid.startCol + 0.5) * grid.cellCm;
   let y = (grid.startRow + 0.5) * grid.cellCm;
   let h = grid.startHeading;
+  let ekfOriginX = x;
+  let ekfOriginY = y;
+  let ekfOriginH = h;
+  let ekfBaseX = 0;
+  let ekfBaseY = 0;
+  let ekfBaseDeg = 0;
 
   const missionObj = state.missions?.[state.activeMissionFile];
   const rawBlocks = Array.isArray(overrideOpts?.blocks)
@@ -405,6 +411,59 @@ export function buildSimSegments(state, overrideOpts = null) {
         turnExitCarryCm = 0;
         const ms = evalExpression(p.ms, vars, 400, evalCtx);
         pushMove(idx, -(getCalibratedSpeedCmPerSec(spd, cal) * ms) / 1000, spd, `BB ${ms}ms`, null, false);
+        break;
+      }
+      case 'EKF_RESET': {
+        turnExitCarryCm = 0;
+        ekfOriginX = x;
+        ekfOriginY = y;
+        ekfOriginH = h;
+        ekfBaseX = evalExpression(p.x, vars, 0, evalCtx);
+        ekfBaseY = evalExpression(p.y, vars, 0, evalCtx);
+        ekfBaseDeg = evalExpression(p.deg, vars, 0, evalCtx);
+        break;
+      }
+      case 'FOLLOW_PATH': {
+        turnExitCarryCm = 0;
+        const pts = parseWaypointListText(p.points);
+        const velCmPs = Math.max(10, evalExpression(p.speed, vars, 50, evalCtx));
+        const refRad = ((ekfOriginH - ekfBaseDeg) * Math.PI) / 180;
+        const sinR = Math.sin(refRad);
+        const cosR = Math.cos(refRad);
+        for (const pt of pts) {
+          const dxEkf = pt.x - ekfBaseX;
+          const dyEkf = pt.y - ekfBaseY;
+          const nx = ekfOriginX + dxEkf * sinR + dyEkf * cosR;
+          const ny = ekfOriginY - dxEkf * cosR + dyEkf * sinR;
+          const segDist = Math.hypot(nx - x, ny - y);
+          if (segDist < 0.2) continue;
+          const nh = (Math.atan2(nx - x, -(ny - y)) * 180) / Math.PI;
+          const ticks = encoderCentimetersToTicks(segDist, 60, cal);
+          const dur = Math.max(80, (segDist / velCmPs) * 1000);
+          nominalCm += segDist;
+          calibratedCm += segDist;
+          totalTicks += ticks;
+          totalMs += dur;
+          segments.push({
+            blockIdx: idx, fx: x, fy: y, fh: h, tx: nx, ty: ny, th: nh,
+            startMs: totalMs - dur, endMs: totalMs, speedCmPs: velCmPs,
+            label: `Path (${pt.x.toFixed(0)},${pt.y.toFixed(0)})`, ticks,
+            effCm: segDist, fieldCm: segDist, dur, marker: null
+          });
+          x = nx;
+          y = ny;
+          h = nh;
+        }
+        break;
+      }
+      case 'VEL_DRIVE': {
+        turnExitCarryCm = 0;
+        const vL = evalExpression(p.vL, vars, 40, evalCtx);
+        const vR = evalExpression(p.vR, vars, 40, evalCtx);
+        const vAvg = (vL + vR) * 0.5;
+        const dur = 250;
+        const dist = (vAvg * dur) / 1000;
+        if (Math.abs(dist) > 0.1) pushMove(idx, dist, 50, `Vel ${vL.toFixed(0)}/${vR.toFixed(0)}`, null, false);
         break;
       }
       case 'SETF':

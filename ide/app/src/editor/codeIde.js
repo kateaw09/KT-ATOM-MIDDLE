@@ -24,7 +24,7 @@ const CPP_KEYWORDS = new Set([
 const CPP_TYPES = new Set([
   'void', 'int', 'float', 'double', 'char', 'bool', 'long', 'short',
   'unsigned', 'signed', 'byte', 'String', 'uint8_t', 'uint16_t', 'uint32_t',
-  'int8_t', 'int16_t', 'int32_t', 'size_t'
+  'int8_t', 'int16_t', 'int32_t', 'size_t', 'Waypoint'
 ]);
 
 const CPP_BOOLS = new Set(['true', 'false', 'NULL', 'nullptr', 'HIGH', 'LOW', 'INPUT', 'OUTPUT', 'INPUT_PULLUP']);
@@ -48,9 +48,25 @@ const ROBOT_COMPLETIONS = [
   { label: 'BB', insert: 'BB(50, 400);', sig: 'BB(speed, ms)', desc: 'ถอยหลังจับเวลา ms', kind: 'API' },
   { label: 'SetF', insert: 'SetF(25, 10.0f);', sig: "SetF(speed [, backCm [, 'R'|'L']])", desc: 'จัดแนวเส้นด้านหน้า + รีเซ็ตมุม Yaw = 0 (-> ถอย -> หยุดหมุน Spin 90°)', kind: 'API' },
   { label: 'SetB', insert: 'SetB(25, 10.0f);', sig: "SetB(speed [, fwdCm [, 'R'|'L']])", desc: 'ถอยจัดแนวเส้นด้านหลัง + รีเซ็ตมุม Yaw = 0 (-> เดินออก -> หยุดหมุน Spin 90°)', kind: 'API' },
-  { label: 'DropF', insert: 'DropF(30);', sig: 'DropF([speed])', desc: 'เข้าเส้นหน้า (SetFront_drop) แล้วปล่อยลูกบาศก์ด้านหน้า', kind: 'API' },
-  { label: 'DropB', insert: 'DropB(30);', sig: 'DropB([speed])', desc: 'เข้าเส้นหลัง (SetBack_drop) แล้วปล่อยลูกบาศก์ด้านหลัง', kind: 'API' },
-  { label: 'STOP', insert: 'STOP();', sig: 'STOP()', desc: 'หยุดรอผู้ใช้กดปุ่ม A/B แล้วรีเซ็ต Yaw', kind: 'API' },
+  { label: 'DropF', insert: 'DropF(30);', sig: 'DropF([speed])', desc: 'เข้าเส้นหน้าแล้วปล่อยลูกบาศก์ด้านหน้า', kind: 'API' },
+  { label: 'DropB', insert: 'DropB(30);', sig: 'DropB([speed])', desc: 'เข้าเส้นหลังแล้วปล่อยลูกบาศก์ด้านหลัง', kind: 'API' },
+  { label: 'STOP', insert: 'STOP();', sig: 'STOP()', desc: 'หยุดรอผู้ใช้กดปุ่ม A/B แล้วรีเซ็ต Yaw & EKF', kind: 'API' },
+  { label: 'driveWheelVelocitiesCmPs', insert: 'driveWheelVelocitiesCmPs(40.0f, 40.0f);', sig: 'driveWheelVelocitiesCmPs(vLeftCmPs, vRightCmPs)', desc: 'คุมความเร็วล้อซ้าย-ขวาหน่วย cm/s ด้วย Velocity PID+FF', kind: 'API' },
+  { label: 'updateWheelVelocitiesCmPs', insert: 'updateWheelVelocitiesCmPs();', sig: 'updateWheelVelocitiesCmPs()', desc: 'อัปเดตความเร็วล้อทั้ง 4 ล้อจาก Encoder (cm/s)', kind: 'API' },
+  { label: 'resetVelocityPid', insert: 'resetVelocityPid();', sig: 'resetVelocityPid()', desc: 'รีเซ็ตสถานะ Integral และตัวกรองความเร็ว Velocity PID', kind: 'API' },
+  { label: 'getRobotLinearVelocityCmPs', insert: 'getRobotLinearVelocityCmPs()', sig: 'getRobotLinearVelocityCmPs()', desc: 'อ่านความเร็วเชิงเส้นเฉลี่ยของหุ่น (cm/s)', kind: 'API' },
+  { label: 'ekfInit', insert: 'ekfInit(0.0f, 0.0f, 0.0f);', sig: 'ekfInit([xCm, yCm, headingDeg])', desc: 'เริ่มต้นระบบคำนวณพิกัด PoseEKF', kind: 'API' },
+  { label: 'ekfReset', insert: 'ekfReset(0.0f, 0.0f, 0.0f);', sig: 'ekfReset([xCm, yCm, headingDeg])', desc: 'รีเซ็ตพิกัด (x, y, heading) ของ PoseEKF', kind: 'API' },
+  { label: 'ekfUpdate', insert: 'ekfUpdate();', sig: 'ekfUpdate()', desc: 'อัปเดต EKF ด้วย Encoder 4 ล้อ + IMU Yaw', kind: 'API' },
+  { label: 'ekfSnapHeadingDeg', insert: 'ekfSnapHeadingDeg(0.0f);', sig: 'ekfSnapHeadingDeg(headingDeg)', desc: 'รีเซ็ตมุมของ PoseEKF ทันที (เช่น หลังเข้าเส้น)', kind: 'API' },
+  { label: 'ekfSnapPose', insert: 'ekfSnapPose(0.0f, 0.0f, 0.0f);', sig: 'ekfSnapPose(xCm, yCm, headingDeg)', desc: 'ตั้งค่าพิกัดและมุมของ PoseEKF ทันที', kind: 'API' },
+  { label: 'ekfGetX', insert: 'ekfGetX()', sig: 'ekfGetX()', desc: 'อ่านพิกัด X ปัจจุบันจาก PoseEKF (cm)', kind: 'API' },
+  { label: 'ekfGetY', insert: 'ekfGetY()', sig: 'ekfGetY()', desc: 'อ่านพิกัด Y ปัจจุบันจาก PoseEKF (cm)', kind: 'API' },
+  { label: 'ekfGetHeadingDeg', insert: 'ekfGetHeadingDeg()', sig: 'ekfGetHeadingDeg()', desc: 'อ่านมุม Yaw ปัจจุบันจาก PoseEKF (deg)', kind: 'API' },
+  { label: 'ekfGetLinearVel', insert: 'ekfGetLinearVel()', sig: 'ekfGetLinearVel()', desc: 'อ่านความเร็วเชิงเส้นจาก PoseEKF (cm/s)', kind: 'API' },
+  { label: 'ekfGetAngularVel', insert: 'ekfGetAngularVel()', sig: 'ekfGetAngularVel()', desc: 'อ่านความเร็วเชิงมุมจาก PoseEKF (rad/s)', kind: 'API' },
+  { label: 'followPath', insert: 'followPath(pts, count, 50.0f, true);', sig: 'followPath(pts, count, maxSpeedCmPs [, stopAtEnd, reverse, timeoutMs])', desc: 'วิ่งตามเส้นทาง Waypoint ด้วย Adaptive Pure Pursuit', kind: 'API' },
+  { label: 'followWaypoints', insert: 'followWaypoints(xs, ys, count, 50.0f, true);', sig: 'followWaypoints(xs, ys, count, maxSpeedCmPs [, stopAtEnd, reverse, timeoutMs])', desc: 'วิ่งตามพิกัด xs[], ys[] ด้วย Adaptive Pure Pursuit', kind: 'API' },
   { label: 'runMode1', insert: 'runMode1();', sig: 'runMode1()', desc: 'ฟังก์ชันภารกิจโหมดที่ 1 (Default)', kind: 'FN' },
   { label: 'runMode2', insert: 'runMode2();', sig: 'runMode2()', desc: 'ฟังก์ชันภารกิจโหมดที่ 2 (Btn B x1)', kind: 'FN' },
   { label: 'runMode3', insert: 'runMode3();', sig: 'runMode3()', desc: 'ฟังก์ชันภารกิจโหมดที่ 3 (Btn B x2)', kind: 'FN' },

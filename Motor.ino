@@ -1,6 +1,6 @@
 // ============================================================================
-// Motor.ino — ควบคุมมอเตอร์ (4-Wheel Speed Balance + Trim), Encoder และเซอร์โว DropF/B
-// (ปรับปรุงตาม PT_MIDDLE_ENC_2026Endcode4 + แก้ Bug 4-Wheel Balance & Sensor Map)
+// Motor.ino — ควบคุมมอเตอร์ (Velocity PID+FF, 4-Wheel Speed Balance, I2C Dedup),
+//             Encoder, Box Calibration และเซอร์โว DropF/B
 // ============================================================================
 
 const unsigned long wheel_speed_sample_ms = 50;
@@ -8,12 +8,21 @@ const float wheel_speed_kp         = 12.0f;
 const float wheel_speed_ki         = 3.0f;
 const float wheel_speed_trim_limit = 20.0f;
 
-static long          s_wheelPrevTicks[4]    = { 0, 0, 0, 0 };
-static unsigned long s_wheelLastSampleMs    = 0;
-static float         s_wheelIntegral[2]     = { 0.0f, 0.0f };
-static float         s_wheelCorrection[2]   = { 0.0f, 0.0f };
-static int           s_wheelPrevSign[2]     = { 0, 0 };
-static bool          s_wheelInitialized     = false;
+static long          s_wheelPrevTicks[4]  = { 0, 0, 0, 0 };
+static unsigned long s_wheelLastSampleMs  = 0;
+static float         s_wheelIntegral[2]   = { 0.0f, 0.0f };
+static float         s_wheelCorrection[2] = { 0.0f, 0.0f };
+static int           s_wheelPrevSign[2]   = { 0, 0 };
+static bool          s_wheelInitialized   = false;
+
+// --- Velocity Estimator & 4-Wheel Velocity PID + Feedforward (cm/s) ---
+static long          s_velPrevTicks[4] = { 0, 0, 0, 0 };
+static float         s_wheelVelCmPs[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+static unsigned long s_velLastUs       = 0;
+static bool          s_velInit         = false;
+static float         s_velIntegral[4]  = { 0.0f, 0.0f, 0.0f, 0.0f };
+static float         s_velPrevErr[4]   = { 0.0f, 0.0f, 0.0f, 0.0f };
+static unsigned long s_velPidLastUs    = 0;
 
 static const byte PT_ENC_PINS_A[4] = { 14, 26, 39, 35 };
 static const byte PT_ENC_PINS_B[4] = { 27, 25, 36, 34 };
@@ -56,6 +65,125 @@ void resetMoveSpeedBalance() {
     s_wheelPrevSign[0]   = 0;
     s_wheelPrevSign[1]   = 0;
     s_wheelInitialized   = false;
+}
+
+void resetVelocityPid() {
+    long c[4];
+    readPtEncoders(c);
+    for (byte i = 0; i < 4; i++) {
+        s_velPrevTicks[i] = c[i];
+        s_wheelVelCmPs[i] = 0.0f;
+        s_velIntegral[i]  = 0.0f;
+        s_velPrevErr[i]   = 0.0f;
+    }
+    s_velLastUs    = micros();
+    s_velPidLastUs = 0;
+    s_velInit      = true;
+}
+
+void updateWheelVelocitiesCmPs() {
+    unsigned long nowUs = micros();
+    long counts[4];
+    readPtEncoders(counts);
+
+    if (!s_velInit) {
+        for (byte i = 0; i < 4; i++) {
+            s_velPrevTicks[i] = counts[i];
+            s_wheelVelCmPs[i] = 0.0f;
+        }
+        s_velLastUs = nowUs;
+        s_velInit   = true;
+        return;
+    }
+
+    unsigned long dtUs = nowUs - s_velLastUs;
+    if (dtUs < 5000UL) {
+        return;
+    }
+
+    float dtSec = (float)dtUs * 1e-6f;
+    if (dtSec > 0.25f) {
+        // ป้องกันความเร็วกระโดดหลังหยุดหรือพักทำงานนาน
+        for (byte i = 0; i < 4; i++) {
+            s_velPrevTicks[i] = counts[i];
+            s_wheelVelCmPs[i] = 0.0f;
+        }
+        s_velLastUs = nowUs;
+        return;
+    }
+
+    float tpcm  = max(1.0f, ticksPerCm);
+    float alpha = constrain(velEmaAlpha, 0.05f, 1.0f);
+    for (byte i = 0; i < 4; i++) {
+        long dTicks   = counts[i] - s_velPrevTicks[i];
+        s_velPrevTicks[i] = counts[i];
+        float rawVel  = ((float)dTicks / tpcm) / dtSec;
+        s_wheelVelCmPs[i] = alpha * rawVel + (1.0f - alpha) * s_wheelVelCmPs[i];
+    }
+    s_velLastUs = nowUs;
+}
+
+void getWheelVelocitiesCmPs(float outVel[4]) {
+    updateWheelVelocitiesCmPs();
+    for (byte i = 0; i < 4; i++) {
+        outVel[i] = s_wheelVelCmPs[i];
+    }
+}
+
+float getLeftVelocityCmPs() {
+    updateWheelVelocitiesCmPs();
+    return 0.5f * (s_wheelVelCmPs[0] + s_wheelVelCmPs[1]);
+}
+
+float getRightVelocityCmPs() {
+    updateWheelVelocitiesCmPs();
+    return 0.5f * (s_wheelVelCmPs[2] + s_wheelVelCmPs[3]);
+}
+
+float getRobotLinearVelocityCmPs() {
+    updateWheelVelocitiesCmPs();
+    return 0.25f * (s_wheelVelCmPs[0] + s_wheelVelCmPs[1] + s_wheelVelCmPs[2] + s_wheelVelCmPs[3]);
+}
+
+void driveWheelVelocitiesCmPs(float targetLeftCmPs, float targetRightCmPs) {
+    updateWheelVelocitiesCmPs();
+
+    if (fabsf(targetLeftCmPs) < 0.5f && fabsf(targetRightCmPs) < 0.5f) {
+        safeMotorStop();
+        resetVelocityPid();
+        return;
+    }
+
+    unsigned long nowUs = micros();
+    bool firstStep = (s_velPidLastUs == 0);
+    float dtSec = firstStep
+        ? 0.01f
+        : constrain((float)(nowUs - s_velPidLastUs) * 1e-6f, 0.005f, 0.10f);
+    s_velPidLastUs = nowUs;
+
+    float lim = max(0.0f, velIntegralLimit);
+    int cmd[4] = { 0, 0, 0, 0 };
+
+    for (byte i = 0; i < 4; i++) {
+        float tgt = (i < 2) ? targetLeftCmPs : targetRightCmPs;
+        if (fabsf(tgt) < 0.5f) {
+            cmd[i]           = 0;
+            s_velIntegral[i] = 0.0f;
+            s_velPrevErr[i]  = 0.0f;
+            continue;
+        }
+
+        float err   = tgt - s_wheelVelCmPs[i];
+        float sgn   = (tgt > 0.0f) ? 1.0f : -1.0f;
+        s_velIntegral[i] = constrain(s_velIntegral[i] + velKi * err * dtSec, -lim, lim);
+        float deriv = firstStep ? 0.0f : ((err - s_velPrevErr[i]) / dtSec);
+        s_velPrevErr[i] = err;
+
+        float u = velKs * sgn + velKv * tgt + velKp * err + s_velIntegral[i] + velKd * deriv;
+        cmd[i] = constrain((int)roundf(u), MOTOR_MIN_SPEED, MOTOR_MAX_SPEED);
+    }
+
+    safeMotorWrite4(cmd[0], cmd[1], cmd[2], cmd[3]);
 }
 
 static inline int64_t abs64(int64_t v) {
@@ -152,7 +280,7 @@ void safeMotorWrite4(int m1, int m2, int m3, int m4) {
     if (s_safeMotorsSynced &&
         c1 == s_safeLastMotors[0] && c2 == s_safeLastMotors[1] &&
         c3 == s_safeLastMotors[2] && c4 == s_safeLastMotors[3] &&
-        (now - s_safeLastI2cMs) < 50UL) {
+        (now - s_safeLastI2cMs) < motorI2cDedupMs) {
         return;
     }
     if (i2cMutex != nullptr) xSemaphoreTake(i2cMutex, portMAX_DELAY);
@@ -211,13 +339,13 @@ void driveMotors(int leftSpeed, int rightSpeed) {
     if (rightSpeed > 0)      right = max(0, rightSpeed + trimR);
     else if (rightSpeed < 0) right = min(0, rightSpeed - trimR);
 
-    // M1, M2 = ฝั่งซ้าย (M1 หน้า, M2 หลัง) | M3, M4 = ฝั่งขวา (M3 หน้า, M4 หลัง)
     safeMotorWrite2(constrain(left, -100, 100), constrain(right, -100, 100));
 }
 
 void driveStop() {
     safeMotorStop();
     resetMoveSpeedBalance();
+    resetVelocityPid();
 }
 
 // ============================================================================
@@ -316,8 +444,11 @@ long readEncoderSingleDistance(byte encoder_index) {
 }
 
 void resetEncoder() {
+    ekfUpdate();          // เก็บระยะที่ค้างอยู่ก่อนรีเซ็ตตัวนับฮาร์ดแวร์
     resetEncoders();
+    ekfSyncEncoders();    // ซิงค์ Baseline ของ EKF ให้เริ่มจาก 0 ตรงกัน
     resetMoveSpeedBalance();
+    resetVelocityPid();
 }
 
 // ============================================================================
@@ -344,7 +475,7 @@ void closeDropB() {
 void DropF() {
     driveStop();
     clearTurnDistCarry();
-    missionNotifyCommand("DropF();", 11); // CMD_ICON_DROP_F
+    missionNotifyCommand("DropF();", 11);
     setServoAngle(SERVO_S0, frontDrop);
     delay(servoDropDelayMs);
     setServoAngle(SERVO_S0, frontLock);
@@ -354,7 +485,7 @@ void DropF() {
 void DropB() {
     driveStop();
     clearTurnDistCarry();
-    missionNotifyCommand("DropB();", 12); // CMD_ICON_DROP_B
+    missionNotifyCommand("DropB();", 12);
     setServoAngle(SERVO_S1, backDrop);
     delay(servoDropDelayMs);
     setServoAngle(SERVO_S1, backLock);

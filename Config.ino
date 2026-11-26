@@ -1,5 +1,6 @@
 // ============================================================================
-// Config.ino — ศูนย์รวมการตั้งค่าโหมด, PID, เซนเซอร์, เซอร์โว, ระยะทาง และการบันทึก Flash
+// Config.ino — ศูนย์รวมการตั้งค่าโหมด, PID, Velocity PID+FF, PoseEKF,
+//              Pure Pursuit, เซนเซอร์, เซอร์โว, ระยะทาง และการบันทึก Flash
 // ============================================================================
 
 Preferences cfgPrefs;
@@ -9,24 +10,24 @@ Preferences cfgPrefs;
 // ============================================================================
 
 // --- 1.1 ตั้งค่าโหมดการทำงานหลัก ---
-bool enableMultiMode = true;   // true = กด B เปลี่ยนโหมด 1-3, กด A รัน | false = กด A หรือ B รันทันที
-int  currentRunMode  = 1;      // โหมดเริ่มต้น = 1 (มี 1, 2, 3)
-bool useCodeMotionDefaults = true; // true = ใช้ค่าเริ่มต้นจากโค้ด Config.ino และล็อก Auto Tune ใน Assembly (ปิดได้โดยคอมเม้นต์ enableCodeMotionDefaults() ใน setup() หรือปิดในตั้งค่า)
+bool enableMultiMode = true;       // true = กด B เปลี่ยนโหมด 1-3, กด A รัน | false = กด A หรือ B รันทันที
+int  currentRunMode  = 1;          // โหมดเริ่มต้น = 1 (มี 1, 2, 3)
+bool useCodeMotionDefaults = true; // true = ใช้ค่าเริ่มต้นจาก Config.ino และล็อก Auto Tune
 
-// --- 1.2 ค่า PID และพารามิเตอร์การเคลื่อนที่ (อ้างอิงตาม PT_MIDDLE_ENC_2026Endcode4MOV1) ---
-float fwdKp       = 1.2f;      // เดินหน้า (FFE / FC): Kp
-float fwdKd       = 15.0f;     // เดินหน้า (FFE / FC): Kd
+// --- 1.2 ค่า PID และพารามิเตอร์การเคลื่อนที่ (FC-Only + FF/BB Time) ---
+float fwdKp       = 1.2f;      // เดินหน้า: Kp
+float fwdKd       = 15.0f;     // เดินหน้า: Kd
 
-float bwdKp       = 1.2f;      // ถอยหลัง (BBE / BC): Kp
-float bwdKd       = 15.0f;     // ถอยหลัง (BBE / BC): Kd
+float bwdKp       = 1.2f;      // ถอยหลัง: Kp
+float bwdKd       = 15.0f;     // ถอยหลัง: Kd
 
-float kp_turn     = 1.35f;     // เดินพร้อมเตรียมเลี้ยว (FFE_turn / BBE_turn / FC / BC / FC4 / BC4): Kp
-float kd_turn     = 15.0f;     // เดินพร้อมเตรียมเลี้ยว (FFE_turn / BBE_turn / FC / BC / FC4 / BC4): Kd
+float kp_turn     = 1.50f;     // เดินตรง FC / BC / FC4 / BC4: Kp
+float kd_turn     = 15.0f;     // เดินตรง FC / BC / FC4 / BC4: Kd
 
-float Set_kp      = 2.0f;      // จัดแนวเข้าเส้น (SetFront / SetBack / SetF / SetB): Kp
-float Set_kd      = 15.0f;     // จัดแนวเข้าเส้น (SetFront / SetBack / SetF / SetB): Kd
+float Set_kp      = 2.0f;      // จัดแนวเข้าเส้น SetF / SetB: Kp
+float Set_kd      = 15.0f;     // จัดแนวเข้าเส้น SetF / SetB: Kd
 
-// พารามิเตอร์ FFE / BBE (Encoder)
+// พารามิเตอร์ Encoder (FC / BC)
 int min_speed_enc      = 40;
 int max_speed_enc      = 100;
 unsigned long ramp_up  = 5;    // ระยะเร่ง (cm)
@@ -37,7 +38,7 @@ int max_speed_enc_turn     = 100;
 unsigned long ramp_up_turn = 5;
 long ramp_down_turn        = 5;
 
-// พารามิเตอร์ FF / BB / FF_turn / BB_turn (แบบจับเวลา ms)
+// พารามิเตอร์จับเวลา (FF / BB Time Move)
 float kp_time          = 1.8f;
 float kd_time          = 15.0f;
 int   min_speed_time   = 20;
@@ -47,41 +48,37 @@ unsigned long ramp_down_ms = 200;
 
 float kp_time_turn          = 1.8f;
 float kd_time_turn          = 15.0f;
-int   min_speed_time_turn   = 40;
-int   max_speed_time_turn   = 80;
-unsigned long ramp_up_time_turn   = 0;
-unsigned long ramp_down_time_turn = 0;
 
 // --- 1.2b ควบคุมระยะคงที่ทุกความเร็ว 1-100 (Speed-Invariant Motion Control) ---
-bool  enableSpeedInvariantDist = true;   // true = คุมระยะให้เท่ากันทุกความเร็ว 1-100 (โค้งเร่ง/ชะลอ + Anti-Stall)
+bool  enableSpeedInvariantDist = true;   // true = คุมระยะให้เท่ากันทุกความเร็ว 1-100
 float moveAccelRate            = 260.0f; // อัตราเร่งลดล้อฟรีตอนออกตัว (speed^2/cm)
-float moveDecelRate            = 260.0f; // อัตราหน่วงชะลอเข้าเป้า (speed^2/cm) — ความเร็วสูงเริ่มชะลอไกลขึ้นอัตโนมัติ
-int   moveArriveSpeed          = 15;     // ความเร็วตอนเข้าเป้าก่อนหยุด (1-40) — ทุกความเร็วจะชะลอมาเท่านี้ก่อนเบรก
-int   motorMinMoveSpeed        = 12;     // ความเร็วขั้นต่ำที่มอเตอร์เริ่มขยับได้จริง (Anti-Stall สำหรับความเร็ว 1-15)
-bool  enableEndPositionTrim    = false;  // true = เติมระยะเดินหน้าเฉพาะกรณีหยุดขาด (ไม่ถอยหลัง)
+float moveDecelRate            = 260.0f; // อัตราหน่วงชะลอเข้าเป้า (speed^2/cm)
+int   moveArriveSpeed          = 15;     // ความเร็วตอนเข้าเป้าก่อนหยุด (1-40)
+int   motorMinMoveSpeed        = 12;     // ความเร็วขั้นต่ำที่มอเตอร์เริ่มขยับได้จริง (Anti-Stall)
+bool  enableEndPositionTrim    = false;  // true = เติมระยะเดินหน้ากรณีหยุดขาด (ไม่ถอยหลัง)
 
-// ค่าควบคุมการหมุนและเลี้ยว (ตาม SpinFunction.ino ของ PT_MIDDLE_ENC_2026Endcode4MOV1)
-float threshold_spinDegree  = 75.0f;   // คลาดเคลื่อนเป้าหมายสำหรับ spinDegree (องศา)
-float spinLeftOffsetDeg     = 0.0f;    // คงไว้เพื่อรองรับ IDE CONFIG_SCHEMA
-float smallAngle_threshold  = 60.0f;   // องศาที่เริ่มใช้ความเร็วต่ำก่อนหยุด spinDegree
-float smallAngle_turnDegree = 50.0f;   // คลาดเคลื่อนเป้าหมายสำหรับ turnDegreeFront / turnDegreeBack
-float turnRightOffsetDeg    = 0.0f;    // คงไว้เพื่อรองรับ IDE CONFIG_SCHEMA
+// ค่าควบคุมการหมุนและเลี้ยว (SpinDegree / TrunDegreeFront / TrunDegreeBack)
+float threshold_spinDegree  = 1.5f;    // เกณฑ์หยุดเข้าเป้า SpinDegree (องศา)
+float spinLeftOffsetDeg     = 0.0f;    // ชดเชยองศา Spin (คงไว้เพื่อรองรับ IDE CONFIG_SCHEMA)
+float smallAngle_threshold  = 30.0f;   // องศาที่เริ่มชะลอความเร็วต่ำก่อนหยุด SpinDegree
+float smallAngle_turnDegree = 1.5f;    // เกณฑ์หยุดเข้าเป้า TrunDegreeFront / TrunDegreeBack (องศา)
+float turnRightOffsetDeg    = 0.0f;    // ชดเชยองศา Turn (คงไว้เพื่อรองรับ IDE CONFIG_SCHEMA)
 
-float spinKp      = 1.2f;      // หมุนอยู่กับที่ (spinDegree): Kp
-float spinKd      = 0.15f;     // หมุนอยู่กับที่ (spinDegree): Kd
-int   spinMinSpeed = 20;       // หมุนอยู่กับที่: ความเร็วต่ำสุด
-int   spinMaxSpeed = 100;      // หมุนอยู่กับที่: ความเร็วสูงสุด
-unsigned long spinPostDelayMs = 30; // settle_time ของ spinDegree (ms)
+float spinKp      = 2.0f;      // SpinDegree: Kp
+float spinKd      = 0.16f;     // SpinDegree: Kd (หน่วงตามความเร็วเชิงมุม deg/s)
+int   spinMinSpeed = 24;       // SpinDegree: ความเร็วต่ำสุด
+int   spinMaxSpeed = 100;      // SpinDegree: ความเร็วสูงสุด
+unsigned long spinPostDelayMs = 25; // settle_time ของ SpinDegree (ms)
 
-float turnFrontKp = 2.0f;      // เลี้ยวไปข้างหน้า (turnDegreeFront): Kp
-float turnFrontKd = 0.1f;      // เลี้ยวไปข้างหน้า (turnDegreeFront): Kd
-int   turnFrontMinSpeed = 40;  // เลี้ยวไปข้างหน้า: ความเร็วต่ำสุด
-int   turnFrontMaxSpeed = 80;  // เลี้ยวไปข้างหน้า: ความเร็วสูงสุด
+float turnFrontKp = 2.5f;      // TrunDegreeFront: Kp
+float turnFrontKd = 0.16f;     // TrunDegreeFront: Kd (หน่วงตามความเร็วเชิงมุม deg/s)
+int   turnFrontMinSpeed = 28;  // TrunDegreeFront: ความเร็วต่ำสุด
+int   turnFrontMaxSpeed = 100; // TrunDegreeFront: ความเร็วสูงสุด
 
-float turnBackKp  = 2.0f;      // เลี้ยวไปข้างหลัง (turnDegreeBack): Kp
-float turnBackKd  = 0.1f;      // เลี้ยวไปข้างหลัง (turnDegreeBack): Kd
-int   turnBackMinSpeed  = 40;  // เลี้ยวไปข้างหลัง: ความเร็วต่ำสุด
-int   turnBackMaxSpeed  = 80;  // เลี้ยวไปข้างหลัง: ความเร็วสูงสุด
+float turnBackKp  = 2.5f;      // TrunDegreeBack: Kp
+float turnBackKd  = 0.16f;     // TrunDegreeBack: Kd (หน่วงตามความเร็วเชิงมุม deg/s)
+int   turnBackMinSpeed  = 28;  // TrunDegreeBack: ความเร็วต่ำสุด
+int   turnBackMaxSpeed  = 100; // TrunDegreeBack: ความเร็วสูงสุด
 float turnInnerRatio    = 0.0f;
 
 // พารามิเตอร์ชดเชยระยะเข้า-ออกโค้ง Swing Turn อัตโนมัติ (เมื่อเปิด enableTurnDistComp = true)
@@ -89,18 +86,18 @@ const float ROBOT_WHEELBASE_CM = 7.5f;
 const float ROBOT_TRACK_CM     = 11.5f;
 bool  enableTurnDistComp       = true;
 float turnEntryCompCm          = 10.0f;
-float turnExitRadiusCm         = 2.8f;   // ระยะหักหลังออกโค้ง Swing 90° ในคำสั่งถัดไป (ซม.) — จุดหมุนแถวล้อหน้า ~2-3 ซม. (ตั้ง 0.0f ได้)
+float turnExitRadiusCm         = 2.8f;   // ระยะหักหลังออกโค้ง Swing 90° ในคำสั่งถัดไป (ซม.)
 
 unsigned long delayALL = 0;    // หน่วงเวลาหลังคำสั่งเดินด้วยเวลา (ms)
 
-// ตัวแปรสถานะและพารามิเตอร์เพิ่มเติมของระบบ PT_MIDDLE_ENC_2026Endcode4MOV1
+// ตัวแปรสถานะการเดินและเลี้ยว
 int   motor_trim_forward  = 0;
 int   motor_trim_backward = 0;
 bool  turn                = false;
 float current_degree      = 0.0f;
 float current_degree_P    = 0.0f;
 
-// พารามิเตอร์ตีโค้ง TT ('TR', 'TL', 'Tr', 'Tl') ตาม MoveENC.ino
+// พารามิเตอร์ตีโค้ง TT ('TR', 'TL', 'Tr', 'Tl')
 int  tt90FastSpeed  = 100;
 int  tt90SlowSpeed  = 15;
 long tt90DistanceCm = 40;
@@ -114,13 +111,11 @@ inline int getLeftMotorTrim()  { return (motorTrim < 0) ? motorTrim : 0; }
 inline int getRightMotorTrim() { return (motorTrim > 0) ? -motorTrim : 0; }
 
 // --- 1.4 เวลาหน่วงเซอร์โวตอนปล่อย (ใช้ร่วมกันทั้ง DropF และ DropB) ---
-int servoDropDelayMs = 200;    // หน่วยมิลลิวินาที (ms) (delayDrop 100 + 100 ms)
+int servoDropDelayMs = 200;    // หน่วยมิลลิวินาที (ms)
 
 // --- 1.5 ตารางตั้งค่าระยะเดินตามจำนวนช่อง 1-8 ช่อง + ค่าชดเชยรวม (Box Distance Calibration) ---
-// แยก "ระยะสนามจริง/Simulator (30, 60, 90... ซม.)" ออกจาก "ระยะที่สั่งล้อหุ่นเดินจริง (ซม.)"
-// โค้ดภารกิจและ Simulator ใส่ระยะตามสนามจริงได้ตรงเป๊ะ โดยไม่ต้องแกะเลขให้ Simulator เกิน
 bool  enableBoxDistCal = true;    // true = เปิดใช้ตารางแปลงระยะ 1-8 ช่องอัตโนมัติ
-float distOffsetCm     = -2.0f;    // ชดเชยระยะเดินตรงรวมทุกช่อง (+/- ซม., เช่น -2.0 = ลดระยะลง 2 ซม. ทุกช่อง, ปรับได้ -10 ถึง +10)
+float distOffsetCm     = -2.0f;   // ชดเชยระยะเดินตรงรวมทุกช่อง (+/- ซม., ปรับได้ -10 ถึง +10)
 float boxTileCm        = 30.0f;   // ความยาวมาตรฐาน 1 ช่องสนาม (ซม.)
 float box1Cm           = 30.0f;   // 1 ช่อง (สนาม  30 cm)
 float box2Cm           = 60.0f;   // 2 ช่อง (สนาม  60 cm)
@@ -131,10 +126,35 @@ float box6Cm           = 180.0f;  // 6 ช่อง (สนาม 180 cm)
 float box7Cm           = 210.0f;  // 7 ช่อง (สนาม 210 cm)
 float box8Cm           = 240.0f;  // 8 ช่อง (สนาม 240 cm)
 
+// --- 1.6 พารามิเตอร์ Kinematics, I2C, Velocity PID+FF, PoseEKF และ Pure Pursuit ---
+float         effectiveTrackCm     = 11.5f;   // ความกว้างฐานล้อเสมือนจริงสำหรับ Skid-Steer 4 ล้อ (cm)
+unsigned long motorI2cDedupMs      = 12;      // ช่วง Dedup I2C มอเตอร์ (ms) รองรับลูป 50-100 Hz
+
+// Velocity PID + Feedforward (หน่วยเป้าหมาย cm/s)
+float velKs            = 8.0f;    // ชดเชยแรงเสียดทานสถิต (Static Friction)
+float velKv            = 0.83f;   // Feedforward Gain (คำนวณตั้งต้นจาก calRun30cmMs = 553)
+float velKp            = 0.90f;   // Proportional Gain
+float velKi            = 2.50f;   // Integral Gain
+float velKd            = 0.02f;   // Derivative Gain
+float velIntegralLimit = 25.0f;   // จำกัดเทอม Integral ในช่วง [-25, +25]
+float velEmaAlpha      = 0.38f;   // ค่ากรอง EMA ของความเร็วล้อ
+
+// PoseEKF (4-Wheel Odometry + IMU Yaw)
+float ekfQPos          = 0.02f;   // Process Noise ตำแหน่ง (cm^2)
+float ekfQHeadingBase  = 0.002f;  // Process Noise มุมขณะวิ่งตรง (rad^2)
+float ekfQHeadingTurn  = 0.060f;  // Process Noise มุมขณะเลี้ยว/ไถล (rad^2)
+float ekfRImuYaw       = 0.0015f; // Measurement Noise ของ IMU Yaw (rad^2)
+
+// Pure Pursuit Path Control
+float ppLookaheadMinCm    = 12.0f;  // ระยะมองล่วงหน้าต่ำสุด (cm, ช่วงจูน 10-14 cm)
+float ppLookaheadMaxCm    = 28.0f;  // ระยะมองล่วงหน้าสูงสุด (cm)
+float ppLookaheadGain     = 0.25f;  // สัดส่วนเพิ่ม Lookahead ตามความเร็ว (k_ld)
+float ppMaxLatAccel       = 120.0f; // ความเร่งด้านข้างสูงสุดขณะเข้าโค้ง (cm/s^2)
+float ppGoalToleranceCm   = 3.0f;   // รัศมีเข้าเป้าจุดสุดท้าย (cm)
+float ppWaypointSpacingCm = 4.0f;   // ระยะแทรกจุด Waypoint (cm)
+
 // ============================================================================
 // [กลุ่มที่ 2] ค่าที่คาลิเบรตจากโหมด Assembly (เก็บใน Flash — ป้องกันการเขียนทับทุกรอบ)
-//    - false (ค่าเริ่มต้น): โหลดค่าที่คาลิเบรตไว้ในหุ่น (Flash) มาใช้งาน ไม่เขียนทับเมื่ออัปโหลดโค้ดใหม่
-//    - true : บังคับเขียนค่าด้านล่างนี้ทับลง Flash (ใช้เฉพาะกรณีจอเสีย/อ่านค่าผ่านจอไม่ได้)
 // ============================================================================
 bool forceOverwriteFlashFromCode = false;
 
@@ -143,8 +163,8 @@ const float TICKS_PER_CM_MIN     = 40.0f;
 const float TICKS_PER_CM_MAX     = 600.0f;
 const float CAL_TEST_DISTANCE_CM = 90.0f;
 float ticksPerCm   = 153.53f; // Encoder Ticks ต่อ 1 ซม. (Full-Quad ล้อ 3.3 ซม.: 1300 / (PI * 3.3))
-int   distTuneMm   = 0;        // ค่าจูนชดเชยระยะเดินมอเตอร์ (คงไว้เพื่อรองรับ IDE/Flash เดิม)
-int   calRun30cmMs = 553;     // เวลาเทียบเท่าการเดิน 30.0 ซม. ที่ความเร็ว 45 (หน่วย ms จากโหมด TEST 90 CM)
+int   distTuneMm   = 0;       // ค่าจูนชดเชยระยะเดินมอเตอร์ (คงไว้เพื่อรองรับ IDE/Flash เดิม)
+int   calRun30cmMs = 553;     // เวลาเทียบเท่าการเดิน 30.0 ซม. ที่ความเร็ว 45 (ms)
 
 // --- 2.2 ค่าคาลิเบรตเซนเซอร์เส้น 4 ตัว (0=ซ้ายบน, 1=ขวาบน, 2=ขวาล่าง, 3=ซ้ายล่าง) ---
 int senMin[4]    = { 200, 200, 200, 200 };
@@ -159,15 +179,15 @@ int frontDrop = 145;
 int backLock  = 79;
 int backDrop  = 154;
 
-// --- 2.4 ตั้งค่าการแสดงคำสั่งและเสียง Beep ตอนรัน (ตั้งค่าในหุ่นผ่านโหมด Assembly) ---
+// --- 2.4 ตั้งค่าการแสดงคำสั่งและเสียง Beep ตอนรัน ---
 bool showCmdOnRun = true;
 bool beepOnCmd    = true;
 
 // ============================================================================
 // [ระบบจัดการค่าเริ่มต้นจากโค้ด (Code Motion Defaults)]
 // ============================================================================
-static bool s_codeDefaultsCalledInSetup   = false;
-static bool s_codeDefaultsSnapshotSaved   = false;
+static bool s_codeDefaultsCalledInSetup = false;
+static bool s_codeDefaultsSnapshotSaved = false;
 
 struct CodeMotionDefaultsSnapshot {
     float fwdKp, fwdKd, bwdKp, bwdKd, kp_turn, kd_turn, Set_kp, Set_kd;
@@ -259,16 +279,16 @@ void enableCodeMotionDefaults() {
 
 static void loadSpinTurnFromFlash(Preferences &prefsObj) {
     int tuneVer = prefsObj.getInt("tver", 0);
-    if (tuneVer < 7) return;
+    if (tuneVer < 8) return;
 
-    threshold_spinDegree  = constrain(prefsObj.getFloat("tspin", threshold_spinDegree), 1.0f, 85.0f);
+    threshold_spinDegree  = constrain(prefsObj.getFloat("tspin", threshold_spinDegree), 0.5f, 45.0f);
     spinLeftOffsetDeg     = constrain(prefsObj.getFloat("slofs", spinLeftOffsetDeg), -10.0f, 10.0f);
-    smallAngle_threshold  = constrain(prefsObj.getFloat("sathr", smallAngle_threshold), 20.0f, 85.0f);
+    smallAngle_threshold  = constrain(prefsObj.getFloat("sathr", smallAngle_threshold), 15.0f, 85.0f);
     spinKp                = constrain(prefsObj.getFloat("spinkp", spinKp), 0.50f, 3.00f);
     spinKd                = constrain(prefsObj.getFloat("spinkd", spinKd), 0.0f, 2.50f);
     spinMaxSpeed          = constrain(prefsObj.getInt("smaxs", spinMaxSpeed), 40, 100);
 
-    smallAngle_turnDegree = constrain(prefsObj.getFloat("tturn", smallAngle_turnDegree), 1.5f, 80.0f);
+    smallAngle_turnDegree = constrain(prefsObj.getFloat("tturn", smallAngle_turnDegree), 0.5f, 45.0f);
     turnRightOffsetDeg    = constrain(prefsObj.getFloat("trofs", turnRightOffsetDeg), -10.0f, 10.0f);
     turnFrontKp           = constrain(prefsObj.getFloat("tfkp", turnFrontKp), 0.50f, 3.00f);
     turnFrontKd           = constrain(prefsObj.getFloat("tfkd", turnFrontKd), 0.0f, 2.50f);
@@ -281,7 +301,7 @@ static void loadSpinTurnFromFlash(Preferences &prefsObj) {
 float estimateCalibratedSpeedCmPerSec(int speed) {
     int spd = abs(speed);
     if (spd < 1) spd = 1;
-    float refCmPerSec = 30000.0f / (float)max(150, calRun30cmMs); // cm/s at speed 45
+    float refCmPerSec = 30000.0f / (float)max(150, calRun30cmMs);
     return refCmPerSec * ((float)spd / 45.0f);
 }
 
@@ -298,11 +318,8 @@ void configPrintCalibrationJson() {
     Serial.println();
     Serial.println("===== KT ROBOT TUNED PARAMETERS =====");
     Serial.printf("bool useCodeMotionDefaults = %s;\n", useCodeMotionDefaults ? "true" : "false");
-    Serial.printf("float threshold_spinDegree  = %.2ff;\n", threshold_spinDegree);
-    Serial.printf("float spinLeftOffsetDeg     = %.2ff;\n", spinLeftOffsetDeg);
-    Serial.printf("float smallAngle_threshold  = %.2ff;\n", smallAngle_threshold);
-    Serial.printf("float smallAngle_turnDegree = %.2ff;\n", smallAngle_turnDegree);
-    Serial.printf("float turnRightOffsetDeg    = %.2ff;\n", turnRightOffsetDeg);
+    Serial.printf("float threshold_spinDegree  = %.2ff; float smallAngle_threshold = %.2ff; float smallAngle_turnDegree = %.2ff;\n",
+                  threshold_spinDegree, smallAngle_threshold, smallAngle_turnDegree);
     Serial.printf("float spinKp = %.2ff; float spinKd = %.2ff; int spinMinSpeed = %d; int spinMaxSpeed = %d;\n",
                   spinKp, spinKd, spinMinSpeed, spinMaxSpeed);
     Serial.printf("float turnFrontKp = %.2ff; float turnFrontKd = %.2ff; int turnFrontMinSpeed = %d; int turnFrontMaxSpeed = %d;\n",
@@ -311,15 +328,14 @@ void configPrintCalibrationJson() {
                   turnBackKp, turnBackKd, turnBackMinSpeed, turnBackMaxSpeed);
     Serial.printf("float fwdKp = %.2ff; float fwdKd = %.2ff; float bwdKp = %.2ff; float bwdKd = %.2ff; float kp_turn = %.2ff; float kd_turn = %.2ff;\n",
                   fwdKp, fwdKd, bwdKp, bwdKd, kp_turn, kd_turn);
-    Serial.printf("float ticksPerCm = %.2ff; int distTuneMm = %d; int motorTrim = %d; int calRun30cmMs = %d;\n",
-                  ticksPerCm, distTuneMm, motorTrim, calRun30cmMs);
-    Serial.printf("bool enableSpeedInvariantDist = %s; float moveAccelRate = %.1ff; float moveDecelRate = %.1ff; int moveArriveSpeed = %d; int motorMinMoveSpeed = %d; bool enableEndPositionTrim = %s;\n",
-                  enableSpeedInvariantDist ? "true" : "false", moveAccelRate, moveDecelRate, moveArriveSpeed, motorMinMoveSpeed, enableEndPositionTrim ? "true" : "false");
-    Serial.printf("bool enableBoxDistCal = %s; float distOffsetCm = %.2ff; float boxTileCm = %.2ff; box1-8 = [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f];\n",
-                  enableBoxDistCal ? "true" : "false", distOffsetCm, boxTileCm,
-                  box1Cm, box2Cm, box3Cm, box4Cm, box5Cm, box6Cm, box7Cm, box8Cm);
-    Serial.printf("bool enableTurnDistComp = %s; float turnEntryCompCm = %.2ff; float turnExitRadiusCm = %.2ff;\n",
-                  enableTurnDistComp ? "true" : "false", turnEntryCompCm, turnExitRadiusCm);
+    Serial.printf("float ticksPerCm = %.2ff; int distTuneMm = %d; int motorTrim = %d; int calRun30cmMs = %d; float effectiveTrackCm = %.2ff;\n",
+                  ticksPerCm, distTuneMm, motorTrim, calRun30cmMs, effectiveTrackCm);
+    Serial.printf("VelocityPID+FF: Ks=%.2ff Kv=%.2ff Kp=%.2ff Ki=%.2ff Kd=%.3ff Ilim=%.1ff Alpha=%.2ff Dedup=%lu ms\n",
+                  velKs, velKv, velKp, velKi, velKd, velIntegralLimit, velEmaAlpha, motorI2cDedupMs);
+    Serial.printf("PoseEKF: Qpos=%.4ff QthBase=%.4ff QthTurn=%.4ff RimYaw=%.4ff\n",
+                  ekfQPos, ekfQHeadingBase, ekfQHeadingTurn, ekfRImuYaw);
+    Serial.printf("PurePursuit: Ld=[%.1f..%.1f]cm Gain=%.2f MaxLatAcc=%.1f Tol=%.1f Spacing=%.1f\n",
+                  ppLookaheadMinCm, ppLookaheadMaxCm, ppLookaheadGain, ppMaxLatAccel, ppGoalToleranceCm, ppWaypointSpacingCm);
     Serial.printf("int senMin[4]    = { %d, %d, %d, %d };\n", senMin[0], senMin[1], senMin[2], senMin[3]);
     Serial.printf("int senMax[4]    = { %d, %d, %d, %d };\n", senMax[0], senMax[1], senMax[2], senMax[3]);
     Serial.printf("int senThresh[4] = { %d, %d, %d, %d };\n", senThresh[0], senThresh[1], senThresh[2], senThresh[3]);
@@ -367,14 +383,12 @@ void serviceSerialCalibrationCommand() {
 void configLoad() {
     captureCodeMotionDefaults();
 
-    // หากเปิดโหมดบังคับเขียนทับ ให้เขียนค่ากลุ่มที่ 2 ลง Flash ทันที
     if (forceOverwriteFlashFromCode) {
         useCodeMotionDefaults = s_codeDefaultsCalledInSetup;
         configSave();
         return;
     }
 
-    // โหลดค่ากลุ่มที่ 2 จาก Flash (หากยังไม่เคยบันทึกใน Flash จะคงค่าเริ่มต้นไว้)
     cfgPrefs.begin("kt_robot", true);
     for (int i = 0; i < 4; i++) {
         char kMin[12], kMax[12], kThr[12];
@@ -476,7 +490,7 @@ void configSave() {
         cfgPrefs.putInt("smaxs",    spinMaxSpeed);
         cfgPrefs.putInt("tfmax",    turnFrontMaxSpeed);
         cfgPrefs.putInt("tbmax",    turnBackMaxSpeed);
-        cfgPrefs.putInt("tver",     7);
+        cfgPrefs.putInt("tver",     8);
     }
 
     cfgPrefs.end();

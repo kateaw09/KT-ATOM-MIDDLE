@@ -25,6 +25,8 @@ const EDITABLE_FILES = [
   'Move.ino',
   'SpinTurn.ino',
   'Motor.ino',
+  'PoseEKF.ino',
+  'PathControl.ino',
   'Interface.ino',
   'Examples.ino',
   'KT_ATOM_Middle.ino'
@@ -92,7 +94,26 @@ const CONFIG_SCHEMA = [
   { key: 'backLock', type: 'int' },
   { key: 'backDrop', type: 'int' },
   { key: 'showCmdOnRun', type: 'bool' },
-  { key: 'beepOnCmd', type: 'bool' }
+  { key: 'beepOnCmd', type: 'bool' },
+  { key: 'effectiveTrackCm', type: 'float' },
+  { key: 'motorI2cDedupMs', type: 'int' },
+  { key: 'velKs', type: 'float' },
+  { key: 'velKv', type: 'float' },
+  { key: 'velKp', type: 'float' },
+  { key: 'velKi', type: 'float' },
+  { key: 'velKd', type: 'float' },
+  { key: 'velIntegralLimit', type: 'float' },
+  { key: 'velEmaAlpha', type: 'float' },
+  { key: 'ekfQPos', type: 'float' },
+  { key: 'ekfQHeadingBase', type: 'float' },
+  { key: 'ekfQHeadingTurn', type: 'float' },
+  { key: 'ekfRImuYaw', type: 'float' },
+  { key: 'ppLookaheadMinCm', type: 'float' },
+  { key: 'ppLookaheadMaxCm', type: 'float' },
+  { key: 'ppLookaheadGain', type: 'float' },
+  { key: 'ppMaxLatAccel', type: 'float' },
+  { key: 'ppGoalToleranceCm', type: 'float' },
+  { key: 'ppWaypointSpacingCm', type: 'float' }
 ];
 
 const MIME_TYPES = {
